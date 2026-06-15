@@ -1,29 +1,72 @@
-//! tree-tui — a ratatui-based terminal user interface.
+//! tree-tui — an interactive code-statistics tree TUI powered by tokei.
+//!
+//! Invoked as `tree <dir>`. The directory is scanned with tokei and presented
+//! as a navigable, sortable directory tree of code/comment/blank stats.
 
-use color_eyre::Result;
+mod cli;
+mod error;
+mod logging;
+mod version;
 
-/// Returns the application's startup banner.
-fn greeting() -> &'static str {
-    "tree-tui — terminal UI"
-}
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use cli::Command;
+use error::AppError;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    color_eyre::install()?;
-    tracing_subscriber::fmt::init();
+async fn main() -> ExitCode {
+    // Install color-eyre first; the terminal-restoring panic hook from
+    // `ratatui::init()` (wired in a later commit) must be installed *after* it.
+    if let Err(err) = color_eyre::install() {
+        eprintln!("{}: failed to install error handler: {err}", cli::BIN_NAME);
+        return ExitCode::FAILURE;
+    }
 
-    tracing::info!("starting tree-tui");
-    println!("{}", greeting());
+    match cli::parse(std::env::args().skip(1)) {
+        Ok(Command::Version) => {
+            println!("{}", version::long_version());
+            ExitCode::SUCCESS
+        }
+        Ok(Command::Help) => {
+            println!("{}", cli::usage());
+            ExitCode::SUCCESS
+        }
+        Ok(Command::Run { dir }) => {
+            let _log_guard = logging::init();
+            match run(dir).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(err) => {
+                    // Concise, chained message for expected errors; the
+                    // color-eyre panic hook still gives rich reports for bugs.
+                    eprintln!("{}: {err:#}", cli::BIN_NAME);
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Err(err) => {
+            eprintln!("{}: {err}\n\n{}", cli::BIN_NAME, cli::usage());
+            // Conventional "usage error" exit code.
+            ExitCode::from(2)
+        }
+    }
+}
 
+/// Validate the target directory and run the application.
+async fn run(dir: PathBuf) -> color_eyre::Result<()> {
+    let root = validate_dir(&dir)?;
+    tracing::info!(target = %root.display(), "tree-tui starting");
+    // The scan + TUI are wired in subsequent commits.
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn greeting_is_stable() {
-        assert_eq!(greeting(), "tree-tui — terminal UI");
+/// Ensure `dir` exists and is a directory, returning its canonical path.
+fn validate_dir(dir: &Path) -> color_eyre::Result<PathBuf> {
+    if !dir.exists() {
+        return Err(AppError::NotFound(dir.to_path_buf()).into());
     }
+    if !dir.is_dir() {
+        return Err(AppError::NotADirectory(dir.to_path_buf()).into());
+    }
+    Ok(std::fs::canonicalize(dir)?)
 }
