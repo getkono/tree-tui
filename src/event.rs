@@ -6,7 +6,6 @@ use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 
-use crate::action;
 use crate::app::{App, Screen};
 use crate::scan;
 use crate::ui;
@@ -29,7 +28,7 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    app.update(action::map_key(key));
+                    app.handle_key(key);
                     redraw = true;
                 }
                 Some(Ok(Event::Resize(_, _))) => redraw = true,

@@ -179,3 +179,22 @@ pub fn composition_bar(stats: &Stats, width: usize) -> Vec<Span<'static>> {
     push(blanks, BLANKS);
     spans
 }
+
+/// A `width`-cell bar filled to `value / total` in `color`, padded with `░`.
+pub fn ratio_bar(value: usize, total: usize, width: usize, color: Color) -> Vec<Span<'static>> {
+    if total == 0 || width == 0 {
+        return vec![Span::styled("░".repeat(width), Style::default().fg(MUTED))];
+    }
+    let filled = (value * width / total).min(width);
+    let mut spans = Vec::new();
+    if filled > 0 {
+        spans.push(Span::styled("█".repeat(filled), Style::default().fg(color)));
+    }
+    if filled < width {
+        spans.push(Span::styled(
+            "░".repeat(width - filled),
+            Style::default().fg(BLANKS),
+        ));
+    }
+    spans
+}

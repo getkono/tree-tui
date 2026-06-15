@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 
-use crate::action::Action;
+use crate::action::{self, Action};
 use crate::model::{self, NodeId, NodeKind, SortDir, SortKey, Tree};
 use crate::scan::ScanOutcome;
 
@@ -16,17 +17,28 @@ pub enum Screen {
     Error(String),
 }
 
+/// Input mode: normal navigation, or typing into the filter box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Normal,
+    Filter,
+}
+
 /// State for the loaded, interactive tree.
 pub struct Loaded {
     pub tree: Tree,
     /// Flattened list of visible node ids (the table's rows). Cached; rebuilt
-    /// only when expansion/sort changes — never on plain cursor movement.
+    /// only when expansion/sort/filter changes — never on plain cursor movement.
     pub visible: Vec<NodeId>,
     pub table_state: TableState,
     /// Rows of tree visible on screen, updated each render; drives paging.
     pub viewport_rows: usize,
     pub duration: Duration,
     pub inaccurate: bool,
+    /// Whether the language-breakdown detail panel is shown.
+    pub show_detail: bool,
+    /// Active name filter (empty = no filter).
+    pub filter: String,
 }
 
 /// Top-level application state.
@@ -36,6 +48,8 @@ pub struct App {
     pub sort_key: SortKey,
     pub sort_dir: SortDir,
     pub screen: Screen,
+    pub mode: Mode,
+    pub show_help: bool,
     pub spinner: usize,
     pub elapsed: Duration,
     pub should_quit: bool,
@@ -49,6 +63,8 @@ impl App {
             sort_key: SortKey::Lines,
             sort_dir: SortDir::Desc,
             screen: Screen::Loading,
+            mode: Mode::Normal,
+            show_help: false,
             spinner: 0,
             elapsed: Duration::ZERO,
             should_quit: false,
@@ -71,11 +87,90 @@ impl App {
             viewport_rows: 1,
             duration: outcome.duration,
             inaccurate: outcome.inaccurate,
+            show_detail: false,
+            filter: String::new(),
         });
     }
 
     pub fn on_scan_failed(&mut self, message: impl Into<String>) {
         self.screen = Screen::Error(message.into());
+    }
+
+    /// Route a key press: help overlay and filter editing intercept input;
+    /// otherwise it maps to a navigation [`Action`].
+    pub fn handle_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && key.code == KeyCode::Char('c') {
+            self.should_quit = true;
+            return;
+        }
+
+        if self.show_help {
+            // Any of these dismiss the overlay; everything else is swallowed.
+            if matches!(key.code, KeyCode::Char('?' | 'q') | KeyCode::Esc) {
+                self.show_help = false;
+            }
+            return;
+        }
+
+        if self.mode == Mode::Filter {
+            self.handle_filter_key(key);
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('/') => self.mode = Mode::Filter,
+            KeyCode::Char('d') if !ctrl => self.toggle_detail(),
+            KeyCode::Tab => self.toggle_detail(),
+            KeyCode::Esc => self.clear_filter(),
+            _ => self.update(action::map_key(key)),
+        }
+    }
+
+    fn handle_filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.set_filter(String::new());
+                self.mode = Mode::Normal;
+            }
+            KeyCode::Enter => self.mode = Mode::Normal,
+            KeyCode::Backspace => {
+                if let Screen::Loaded(loaded) = &self.screen {
+                    let mut filter = loaded.filter.clone();
+                    filter.pop();
+                    self.set_filter(filter);
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Screen::Loaded(loaded) = &self.screen {
+                    let mut filter = loaded.filter.clone();
+                    filter.push(c);
+                    self.set_filter(filter);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn toggle_detail(&mut self) {
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.show_detail = !loaded.show_detail;
+        }
+    }
+
+    /// Clear an active filter (Esc in normal mode); a no-op otherwise.
+    fn clear_filter(&mut self) {
+        if matches!(&self.screen, Screen::Loaded(l) if !l.filter.is_empty()) {
+            self.set_filter(String::new());
+        }
+    }
+
+    fn set_filter(&mut self, filter: String) {
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.filter = filter;
+            loaded.rebuild();
+        }
     }
 
     /// Apply an action to the current state.
@@ -120,7 +215,11 @@ impl Loaded {
     fn rebuild(&mut self) {
         let previous_id = self.selected_id();
         let previous_index = self.table_state.selected();
-        self.visible = model::view::flatten_visible(&self.tree);
+        self.visible = if self.filter.is_empty() {
+            model::view::flatten_visible(&self.tree)
+        } else {
+            model::view::flatten_filtered(&self.tree, &self.filter)
+        };
         if self.visible.is_empty() {
             self.table_state.select(None);
             return;

@@ -1,7 +1,9 @@
 //! Rendering: dispatch by screen state and lay out the top-level regions.
 
+mod detail;
 mod footer;
 mod header;
+mod help;
 mod loading;
 pub mod theme;
 mod tree_view;
@@ -12,7 +14,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use crate::app::{App, Screen};
+use crate::app::{App, Mode, Screen};
 
 /// Render the current frame for `app`.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -24,6 +26,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     } else if let Screen::Error(message) = &app.screen {
         render_error(frame, message, area);
     }
+
+    if app.show_help {
+        help::render(frame, area);
+    }
 }
 
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -31,6 +37,7 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     let root_label = app.root_label.clone();
     let sort_key = app.sort_key;
     let sort_dir = app.sort_dir;
+    let editing = app.mode == Mode::Filter;
     let Screen::Loaded(loaded) = &mut app.screen else {
         return;
     };
@@ -50,8 +57,49 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
         loaded.inaccurate,
         header_area,
     );
-    tree_view::render(frame, loaded, body_area);
-    footer::render(frame, sort_key, sort_dir, footer_area);
+
+    // The detail panel, when shown, takes a fixed column on the right.
+    let tree_area = if loaded.show_detail {
+        let [left, right] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(36)]).areas(body_area);
+        detail::render(frame, loaded, right);
+        left
+    } else {
+        body_area
+    };
+
+    if loaded.visible.is_empty() {
+        render_empty(frame, &loaded.filter, tree_area);
+    } else {
+        tree_view::render(frame, loaded, tree_area);
+    }
+
+    footer::render(
+        frame,
+        sort_key,
+        sort_dir,
+        &loaded.filter,
+        editing,
+        footer_area,
+    );
+}
+
+fn render_empty(frame: &mut Frame, filter: &str, area: Rect) {
+    let message = if filter.is_empty() {
+        "No countable code found here."
+    } else {
+        "No matches for this filter."
+    };
+    let block = Block::bordered()
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(" tree ");
+    let paragraph = Paragraph::new(vec![
+        Line::default(),
+        Line::from(Span::styled(message, Style::default().fg(theme::MUTED))),
+    ])
+    .alignment(Alignment::Center)
+    .block(block);
+    frame.render_widget(paragraph, area);
 }
 
 fn render_error(frame: &mut Frame, message: &str, area: Rect) {
@@ -136,5 +184,27 @@ mod tests {
         assert!(view.contains("lines"));
         assert!(view.contains("src"));
         assert!(view.contains("README.md"));
+    }
+
+    #[test]
+    fn renders_detail_panel_and_help_overlay() {
+        use crate::app::Screen;
+        let mut app = sample_app();
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.show_detail = true;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
+
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let detail = format!("{}", terminal.backend());
+        assert!(detail.contains("detail"));
+        assert!(detail.contains("languages"));
+        assert!(detail.contains("Rust"));
+
+        app.show_help = true;
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let help = format!("{}", terminal.backend());
+        assert!(help.contains("keybindings"));
+        assert!(help.contains("quit"));
     }
 }
