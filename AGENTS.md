@@ -31,6 +31,9 @@ so anything green locally is green in CI.
 - The TUI owns stdout/stderr: route all diagnostics through `tracing` (to a file via
   tracing-appender), never `println!`/`eprintln!` once the alternate screen is active.
 - Restore the terminal (leave raw mode + alternate screen) on every exit path, including
-  panics — install `color-eyre` plus a terminal-restoring panic hook.
+  panics. `ratatui::init()` already installs a terminal-restoring panic hook, so just call
+  `color_eyre::install()` **first** and `ratatui::init()` after — ratatui chains the prior
+  hook, so the terminal is restored before color-eyre prints its report. Pair every init with
+  `ratatui::restore()` on the way out (see `src/tui.rs`, `src/main.rs`).
 - Use typed errors (`thiserror`) inside modules; use `color_eyre::Result` at the application
   boundary (`main`, top-level handlers).
