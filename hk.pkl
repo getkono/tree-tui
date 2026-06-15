@@ -2,9 +2,19 @@ amends "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Config.
 
 // Git hooks for tree-tui, driven by mise tasks (see mise.toml).
 //
+//   commit-msg -> lint the message against Conventional Commits (convco)
 //   pre-commit -> auto-fix formatting + Clippy on staged Rust files, then re-stage
-//   pre-push   -> read-only checks + full test suite as a final gate before pushing
+//   pre-push   -> read-only checks + full test suite + commit lint as a final gate
 hooks {
+    // Reject commit messages that aren't Conventional Commits.
+    // {{commit_msg_file}} is the path git passes to the commit-msg hook.
+    ["commit-msg"] {
+        steps {
+            ["convco"] {
+                check = "mise run commit-msg-check {{commit_msg_file}}"
+            }
+        }
+    }
     ["pre-commit"] {
         fix = true       // run each step's `fix` command
         stage = true     // re-stage files fixed by a step (matched by its glob)
@@ -37,6 +47,10 @@ hooks {
             ["test"] {
                 glob = List("*.rs")
                 check = "mise run test"
+            }
+            // Lint this branch's commits (origin/master..HEAD); no glob, runs every push.
+            ["commit-check"] {
+                check = "mise run commit-check"
             }
         }
     }

@@ -2,7 +2,13 @@
 # The Rust toolchain itself is pinned in rust-toolchain.toml (rustup), not here.
 
 [tools]
-hk = "1.48.0" # git hooks manager
+hk = "1.48.0"            # git hooks manager (see hk.pkl)
+"cargo:convco" = "0.6.4" # Conventional Commits linter (built from source; not in mise's registry)
+
+# After `mise install`, wire up hk's git hooks through mise so they resolve hk + tools
+# without requiring shell activation. Skipped in CI, where the hooks aren't installed.
+[hooks]
+postinstall = 'test -n "$CI" || hk install --mise'
 
 [tasks.dev]
 description = "Build and run the TUI"
@@ -31,6 +37,15 @@ run = "cargo clippy --fix --allow-dirty --allow-staged --all-targets"
 [tasks.test]
 description = "Run the test suite"
 run = "cargo test"
+
+[tasks.commit-check]
+description = "Verify this branch's commits (vs origin/master) follow Conventional Commits"
+run = "convco check origin/master..HEAD"
+
+[tasks.commit-msg-check]
+description = "Lint a single commit message file against Conventional Commits (commit-msg hook)"
+usage = 'arg "<file>" help="Path to the commit message file"'
+run = 'convco check --from-stdin --strip < "${usage_file}"'
 
 [tasks.check]
 description = "Run format check, lint, and tests"
