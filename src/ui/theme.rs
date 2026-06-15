@@ -158,6 +158,14 @@ pub fn group_thousands(n: usize) -> String {
     out
 }
 
+/// Format `value / total` as a percentage with one decimal: `"58.4%"`.
+pub fn percent(value: usize, total: usize) -> String {
+    if total == 0 {
+        return "0.0%".to_string();
+    }
+    format!("{:.1}%", value as f64 / total as f64 * 100.0)
+}
+
 /// A `width`-cell horizontal bar showing the code/comment/blank composition.
 pub fn composition_bar(stats: &Stats, width: usize) -> Vec<Span<'static>> {
     let total = stats.lines();

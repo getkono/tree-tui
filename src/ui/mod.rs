@@ -184,6 +184,9 @@ mod tests {
         assert!(view.contains("lines"));
         assert!(view.contains("src"));
         assert!(view.contains("README.md"));
+        // The languages column renders even when rows are single-language: the
+        // per-row legend ("Markdown") only appears in that column.
+        assert!(view.contains("Markdown"));
     }
 
     #[test]

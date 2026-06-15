@@ -60,6 +60,14 @@ pub fn render(frame: &mut Frame, loaded: &Loaded, area: Rect) {
         Some(theme::COMMENTS),
     ));
     lines.push(stat_line("blanks", node.stats.blanks, Some(theme::BLANKS)));
+
+    // Code / comment / blank composition, as a single recap bar.
+    let mut composition = vec![Span::styled(
+        format!("{:<10} ", "mix"),
+        Style::default().fg(theme::MUTED),
+    )];
+    composition.extend(theme::composition_bar(&node.stats, BAR_WIDTH));
+    lines.push(Line::from(composition));
     lines.push(Line::default());
 
     lines.push(Line::from(Span::styled(
@@ -80,7 +88,7 @@ pub fn render(frame: &mut Frame, loaded: &Loaded, area: Rect) {
         )];
         spans.extend(theme::ratio_bar(stats.lines(), total, BAR_WIDTH, color));
         spans.push(Span::styled(
-            format!(" {}", theme::group_thousands(stats.lines())),
+            format!(" {:>6}", theme::percent(stats.lines(), total)),
             Style::default().fg(theme::MUTED),
         ));
         lines.push(Line::from(spans));

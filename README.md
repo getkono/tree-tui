@@ -16,8 +16,11 @@ tree <dir>
 - **Navigate & drill in** — expand/collapse directories, jump to parent/child, page, go to top/bottom.
 - **Sort** — by lines, code, comments, blanks, file count, or name; reverse on demand.
 - **Filter** — live name filter that reveals matches together with their parent path.
-- **Detail panel** — per-language breakdown with proportion bars for the selected node.
-- **Composition bars** — at-a-glance code/comment/blank mix per row; color-coded language tags.
+- **Detail panel** — per-language breakdown with proportion bars and percentages, plus a
+  code/comment/blank composition bar for the selected node.
+- **Language distribution** — a responsive language column that lists each language and its
+  percentage (e.g. `Rust (96.5%), C++ (3.4%), Other (0.1%)`), collapsing tail languages into
+  `Other` (and finally an `N languages` count) as the terminal narrows.
 - **Responsive** — columns drop gracefully as the terminal narrows; works on any Unicode terminal.
 - **Async & responsive** — the scan runs off-thread with a spinner; the UI never blocks.
 
