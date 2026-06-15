@@ -1,0 +1,33 @@
+# mise manages dev tools and tasks for tree-tui.
+# The Rust toolchain itself is pinned in rust-toolchain.toml (rustup), not here.
+
+[tools]
+hk = "1.48.0" # git hooks manager
+
+[tasks.dev]
+description = "Build and run the TUI"
+run = "cargo run"
+
+[tasks.fmt]
+description = "Format all code"
+run = "cargo fmt --all"
+
+[tasks.fmt-check]
+description = "Check formatting without modifying files"
+run = "cargo fmt --all --check"
+
+[tasks.lint]
+description = "Lint with Clippy, deny warnings"
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.lint-fix]
+description = "Auto-fix Clippy lints"
+run = "cargo clippy --fix --allow-dirty --allow-staged --all-targets"
+
+[tasks.test]
+description = "Run the test suite"
+run = "cargo test"
+
+[tasks.check]
+description = "Run format check, lint, and tests"
+depends = ["fmt-check", "lint", "test"]

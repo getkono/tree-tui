@@ -1,0 +1,43 @@
+amends "package://github.com/jdx/hk/releases/download/v1.48.0/hk@1.48.0#/Config.pkl"
+
+// Git hooks for tree-tui, driven by mise tasks (see mise.toml).
+//
+//   pre-commit -> auto-fix formatting + Clippy on staged Rust files, then re-stage
+//   pre-push   -> read-only checks + full test suite as a final gate before pushing
+hooks {
+    ["pre-commit"] {
+        fix = true       // run each step's `fix` command
+        stage = true     // re-stage files fixed by a step (matched by its glob)
+        stash = "git"    // stash unstaged changes so hooks only see staged content
+        steps {
+            ["fmt"] {
+                glob = List("*.rs")
+                check = "mise run fmt-check"
+                fix = "mise run fmt"
+            }
+            ["clippy"] {
+                glob = List("*.rs")
+                depends = List("fmt") // lint after formatting settles
+                check = "mise run lint"
+                fix = "mise run lint-fix"
+            }
+        }
+    }
+    ["pre-push"] {
+        fix = false // check-only: never mutate files on push
+        steps {
+            ["fmt"] {
+                glob = List("*.rs")
+                check = "mise run fmt-check"
+            }
+            ["clippy"] {
+                glob = List("*.rs")
+                check = "mise run lint"
+            }
+            ["test"] {
+                glob = List("*.rs")
+                check = "mise run test"
+            }
+        }
+    }
+}
