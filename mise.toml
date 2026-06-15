@@ -8,6 +8,10 @@ hk = "1.48.0" # git hooks manager
 description = "Build and run the TUI"
 run = "cargo run"
 
+[tasks.install]
+description = "Install the `tree` binary into the cargo bin dir"
+run = "cargo install --path . --force"
+
 [tasks.fmt]
 description = "Format all code"
 run = "cargo fmt --all"
