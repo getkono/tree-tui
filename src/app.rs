@@ -53,6 +53,9 @@ pub struct App {
     pub spinner: usize,
     pub elapsed: Duration,
     pub should_quit: bool,
+    /// A file the user asked to open in their editor, drained by the event loop
+    /// (which owns the terminal) after each key press.
+    pub pending_open: Option<PathBuf>,
 }
 
 impl App {
@@ -68,6 +71,7 @@ impl App {
             spinner: 0,
             elapsed: Duration::ZERO,
             should_quit: false,
+            pending_open: None,
         }
     }
 
@@ -186,6 +190,7 @@ impl App {
                 self.sort_dir = self.sort_dir.flip();
                 self.apply_sort();
             }
+            Action::Open => self.open_selected(),
             other => {
                 if let Screen::Loaded(loaded) = &mut self.screen {
                     loaded.handle(other);
@@ -199,6 +204,24 @@ impl App {
             model::view::sort(&mut loaded.tree, self.sort_key, self.sort_dir);
             loaded.rebuild();
         }
+    }
+
+    /// Enter on the selection: expand/descend a directory, or queue the selected
+    /// file to open in the user's editor. The event loop owns the terminal and
+    /// performs the actual suspend-and-launch.
+    fn open_selected(&mut self) {
+        let Screen::Loaded(loaded) = &mut self.screen else {
+            return;
+        };
+        let Some(id) = loaded.selected_id() else {
+            return;
+        };
+        if loaded.tree.nodes[id].is_dir() {
+            loaded.expand_or_descend();
+            return;
+        }
+        let rel_path = loaded.tree.nodes[id].rel_path.clone();
+        self.pending_open = Some(self.root.join(rel_path));
     }
 }
 
@@ -327,5 +350,76 @@ impl Loaded {
             }
         }
         self.rebuild();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::Action;
+    use crate::model::build_tree;
+    use crate::scan::ScanOutcome;
+    use std::path::{Path, PathBuf};
+    use tokei::{Language, LanguageType, Languages, Report};
+
+    /// A loaded app for `/proj` with `src/main.rs` and a top-level `README.md`.
+    fn sample_app() -> App {
+        let mut rust = Language::new();
+        rust.reports = vec![Report::new(PathBuf::from("/proj/src/main.rs"))];
+        let mut md = Language::new();
+        md.reports = vec![Report::new(PathBuf::from("/proj/README.md"))];
+        let mut languages = Languages::new();
+        languages.insert(LanguageType::Rust, rust);
+        languages.insert(LanguageType::Markdown, md);
+
+        let tree = build_tree(&languages, Path::new("/proj"), "proj".into());
+        let mut app = App::new(PathBuf::from("/proj"), "proj".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            inaccurate: false,
+        });
+        app
+    }
+
+    fn select(app: &mut App, name: &str) {
+        let Screen::Loaded(loaded) = &mut app.screen else {
+            panic!("expected a loaded screen");
+        };
+        let index = loaded
+            .visible
+            .iter()
+            .position(|&id| loaded.tree.nodes[id].name == name)
+            .unwrap_or_else(|| panic!("{name} is not visible"));
+        loaded.table_state.select(Some(index));
+    }
+
+    fn is_visible(app: &App, name: &str) -> bool {
+        let Screen::Loaded(loaded) = &app.screen else {
+            return false;
+        };
+        loaded
+            .visible
+            .iter()
+            .any(|&id| loaded.tree.nodes[id].name == name)
+    }
+
+    #[test]
+    fn enter_on_a_file_queues_it_for_the_editor() {
+        let mut app = sample_app();
+        select(&mut app, "README.md");
+        app.update(Action::Open);
+        assert_eq!(app.pending_open, Some(PathBuf::from("/proj/README.md")));
+    }
+
+    #[test]
+    fn enter_on_a_directory_expands_without_queuing() {
+        let mut app = sample_app();
+        // `src` starts collapsed, so its child is not yet visible.
+        assert!(!is_visible(&app, "main.rs"));
+        select(&mut app, "src");
+        app.update(Action::Open);
+        assert!(app.pending_open.is_none());
+        assert!(is_visible(&app, "main.rs"));
     }
 }

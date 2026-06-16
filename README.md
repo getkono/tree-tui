@@ -1,7 +1,7 @@
-# tree-tui
+# tree
 
 An interactive, aesthetically-complete terminal UI for [tokei](https://github.com/XAMPPRocky/tokei).
-Where `tokei` prints code statistics grouped *by language*, `tree-tui` shows your project as a
+Where `tokei` prints code statistics grouped *by language*, `tree` shows your project as a
 navigable **directory tree** with code / comment / blank counts aggregated up every folder — so you
 can see *where* the code actually lives.
 
@@ -51,7 +51,8 @@ The syntax is strict: exactly one directory, no unknown flags. Anything else pri
 | `j` / `k`, `↓` / `↑` | move selection |
 | `g` / `G` | jump to top / bottom |
 | `Ctrl-d` / `Ctrl-u`, `PgDn` / `PgUp` | page down / up |
-| `l` / `→` / `Enter` | expand a directory, or descend into it |
+| `l` / `→` | expand a directory, or descend into it |
+| `Enter` | open the selected file in `$EDITOR` (`$VISUAL`, then `vi`), or expand a directory |
 | `h` / `←` | collapse a directory, or jump to its parent |
 | `Space` | toggle the selected directory |
 | `E` / `C` | expand all / collapse all |
@@ -64,7 +65,7 @@ The syntax is strict: exactly one directory, no unknown flags. Anything else pri
 
 ### Logging
 
-The TUI owns the terminal, so logs go to a file and only when asked. Set `TREE_TUI_LOG=path.log`
+The TUI owns the terminal, so logs go to a file and only when asked. Set `TREE_LOG=path.log`
 (and optionally `RUST_LOG=debug`) to enable file logging.
 
 ## Development
@@ -87,7 +88,7 @@ The TUI owns the terminal, so logs go to a file and only when asked. Set `TREE_T
 
 ## How it works
 
-`tree-tui` calls `tokei::Languages::get_statistics` on a blocking task, then folds the per-file
+`tree` calls `tokei::Languages::get_statistics` on a blocking task, then folds the per-file
 `Report`s into an arena-backed directory tree — merging reports that share a path across languages
 (embedded languages) and aggregating stats up to the root. The view layer sorts siblings (stable,
 total order) and flattens the visible nodes into rows for a ratatui `Table`. The event loop is a

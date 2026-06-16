@@ -18,6 +18,8 @@ pub enum Action {
     PageDown,
     /// Expand a collapsed dir, or descend into an expanded one.
     Expand,
+    /// Activate the selection: expand/descend a dir, or open a file in $EDITOR.
+    Open,
     /// Collapse an expanded dir, or move to the parent.
     Collapse,
     /// Toggle expansion of the selected dir.
@@ -42,7 +44,8 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('G') | KeyCode::End => Action::Last,
         KeyCode::PageDown => Action::PageDown,
         KeyCode::PageUp => Action::PageUp,
-        KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => Action::Expand,
+        KeyCode::Char('l') | KeyCode::Right => Action::Expand,
+        KeyCode::Enter => Action::Open,
         KeyCode::Char('h') | KeyCode::Left => Action::Collapse,
         KeyCode::Char(' ') => Action::Toggle,
         KeyCode::Char('E') => Action::ExpandAll,

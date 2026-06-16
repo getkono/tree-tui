@@ -180,7 +180,7 @@ mod tests {
         let view = format!("{}", terminal.backend());
         // Run `cargo test -- --nocapture` and uncomment to eyeball the layout:
         // eprintln!("\n{view}");
-        assert!(view.contains("tree-tui"));
+        assert!(view.contains("tree"));
         assert!(view.contains("lines"));
         assert!(view.contains("src"));
         assert!(view.contains("README.md"));

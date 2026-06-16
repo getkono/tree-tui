@@ -1,4 +1,4 @@
-//! tree-tui — an interactive code-statistics tree TUI powered by tokei.
+//! tree — an interactive code-statistics tree TUI powered by tokei.
 //!
 //! Invoked as `tree <dir>`. The directory is scanned with tokei and presented
 //! as a navigable, sortable directory tree of code/comment/blank stats.
@@ -6,6 +6,7 @@
 mod action;
 mod app;
 mod cli;
+mod editor;
 mod error;
 mod event;
 mod logging;
@@ -65,7 +66,7 @@ async fn main() -> ExitCode {
 async fn run(dir: PathBuf) -> color_eyre::Result<()> {
     let root = validate_dir(&dir)?;
     let label = root_label(&dir, &root);
-    tracing::info!(target = %root.display(), "tree-tui starting");
+    tracing::info!(target = %root.display(), "tree starting");
 
     let mut app = App::new(root, label);
     let mut terminal = tui::init()?;
