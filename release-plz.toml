@@ -1,0 +1,14 @@
+# release-plz: automated, Conventional-Commit-driven releases for tree-tui.
+# Docs: https://release-plz.dev
+#
+# On every push to master, the workflow (.github/workflows/release-plz.yml) either:
+#   - opens/updates a "release PR" that bumps the version and updates CHANGELOG.md, or
+#   - (when that PR is merged) publishes to crates.io and cuts a GitHub Release + tag.
+[workspace]
+# Maintain CHANGELOG.md from Conventional Commits (keep-a-changelog format).
+changelog_update = true
+# Cut a GitHub Release (with generated notes) and a `v{version}` git tag per release.
+git_release_enable = true
+git_tag_enable = true
+# Binary crate with no public library API, so cargo-semver-checks would only add noise.
+semver_check = false
