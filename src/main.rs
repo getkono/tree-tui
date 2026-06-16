@@ -6,6 +6,7 @@
 mod action;
 mod app;
 mod cli;
+mod editor;
 mod error;
 mod event;
 mod logging;

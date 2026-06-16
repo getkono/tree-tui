@@ -47,7 +47,9 @@ pub fn render(
     } else {
         Line::from(vec![
             badge(format!(" sort: {} {} ", sort_key.label(), sort_dir.arrow())),
-            muted(" j/k move · l/h expand · s sort · r reverse · / filter · ? help · q quit"),
+            muted(
+                " j/k move · l/h expand · Enter open · s sort · r reverse · / filter · ? help · q quit",
+            ),
         ])
     };
 

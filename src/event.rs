@@ -7,8 +7,7 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 
 use crate::app::{App, Screen};
-use crate::scan;
-use crate::ui;
+use crate::{editor, scan, tui, ui};
 
 /// Drive the app until the user quits or input is exhausted.
 ///
@@ -29,6 +28,9 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
+                    if let Some(path) = app.pending_open.take() {
+                        tui::suspended(terminal, || editor::open(&path))?;
+                    }
                     redraw = true;
                 }
                 Some(Ok(Event::Resize(_, _))) => redraw = true,

@@ -51,7 +51,8 @@ The syntax is strict: exactly one directory, no unknown flags. Anything else pri
 | `j` / `k`, `↓` / `↑` | move selection |
 | `g` / `G` | jump to top / bottom |
 | `Ctrl-d` / `Ctrl-u`, `PgDn` / `PgUp` | page down / up |
-| `l` / `→` / `Enter` | expand a directory, or descend into it |
+| `l` / `→` | expand a directory, or descend into it |
+| `Enter` | open the selected file in `$EDITOR` (`$VISUAL`, then `vi`), or expand a directory |
 | `h` / `←` | collapse a directory, or jump to its parent |
 | `Space` | toggle the selected directory |
 | `E` / `C` | expand all / collapse all |
