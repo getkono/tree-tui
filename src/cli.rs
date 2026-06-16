@@ -14,7 +14,7 @@ pub const BIN_NAME: &str = "tree";
 /// A fully parsed invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Render the interactive code-stats tree for `dir`.
+    /// Render the interactive directory visualizer for `dir`.
     Run { dir: PathBuf },
     /// Print the version / build report and exit.
     Version,
@@ -67,10 +67,10 @@ where
 /// The multi-line usage string.
 pub fn usage() -> String {
     format!(
-        "{BIN_NAME} — interactive code-statistics tree (powered by tokei)\n\
+        "{BIN_NAME} — interactive directory visualizer (code, size, git)\n\
          \n\
          usage:\n  \
-           {BIN_NAME} <dir>        scan <dir> and explore its code stats\n  \
+           {BIN_NAME} <dir>           explore <dir> through swappable lenses\n  \
            {BIN_NAME} -V, --version   print version and build info\n  \
            {BIN_NAME} -h, --help      print this help"
     )

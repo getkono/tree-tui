@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use tokei::LanguageType;
 
-use crate::model::Stats;
+use crate::model::{SubKey, Tint};
 
 // Tree glyphs (Unicode, renders everywhere).
 pub const GLYPH_EXPANDED: &str = "▾";
@@ -26,6 +26,12 @@ pub const BADGE_FG: Color = Color::Rgb(17, 17, 27);
 pub const CODE: Color = Color::Rgb(166, 209, 137);
 pub const COMMENTS: Color = Color::Rgb(125, 166, 255);
 pub const BLANKS: Color = Color::Rgb(88, 91, 112);
+
+// Lens-metric colors (size, git add/delete, status).
+pub const ADD: Color = Color::Rgb(166, 209, 137); // green
+pub const DEL: Color = Color::Rgb(243, 139, 168); // red
+pub const SIZE: Color = Color::Rgb(250, 179, 135); // peach
+pub const STATUS: Color = Color::Rgb(249, 226, 175); // amber
 
 /// A recognizable color for popular languages; a stable hashed color otherwise.
 pub fn language_color(lang: LanguageType) -> Color {
@@ -166,25 +172,26 @@ pub fn percent(value: usize, total: usize) -> String {
     format!("{:.1}%", value as f64 / total as f64 * 100.0)
 }
 
-/// A `width`-cell horizontal bar showing the code/comment/blank composition.
-pub fn composition_bar(stats: &Stats, width: usize) -> Vec<Span<'static>> {
-    let total = stats.lines();
+/// A `width`-cell horizontal bar split across colored segments (e.g. code /
+/// comments / blanks, or added / deleted). The last segment absorbs rounding.
+pub fn segments_bar(segments: &[(usize, Color)], width: usize) -> Vec<Span<'static>> {
+    let total: usize = segments.iter().map(|(value, _)| *value).sum();
     if total == 0 || width == 0 {
         return vec![Span::styled("░".repeat(width), Style::default().fg(MUTED))];
     }
-    let code = (stats.code * width / total).min(width);
-    let comments = (stats.comments * width / total).min(width - code);
-    let blanks = width - code - comments;
-
     let mut spans = Vec::new();
-    let mut push = |count: usize, color: Color| {
-        if count > 0 {
-            spans.push(Span::styled("█".repeat(count), Style::default().fg(color)));
+    let mut used = 0;
+    for (i, (value, color)) in segments.iter().enumerate() {
+        let cells = if i + 1 == segments.len() {
+            width - used
+        } else {
+            (value * width / total).min(width - used)
+        };
+        if cells > 0 {
+            spans.push(Span::styled("█".repeat(cells), Style::default().fg(*color)));
+            used += cells;
         }
-    };
-    push(code, CODE);
-    push(comments, COMMENTS);
-    push(blanks, BLANKS);
+    }
     spans
 }
 
@@ -205,4 +212,43 @@ pub fn ratio_bar(value: usize, total: usize, width: usize, color: Color) -> Vec<
         ));
     }
     spans
+}
+
+/// Human-readable byte size (binary units, one decimal): `1536` → `"1.5 KB"`.
+pub fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// Format a metric value for display: sizes are human-readable bytes, everything
+/// else is a thousands-grouped count.
+pub fn format_value(key: SubKey, value: u128) -> String {
+    if key.is_bytes() {
+        human_bytes(value as u64)
+    } else {
+        group_thousands(value as usize)
+    }
+}
+
+/// The color for a column [`Tint`]. `Plain` has no color (rendered bold/default).
+pub fn tint_color(tint: Tint) -> Option<Color> {
+    match tint {
+        Tint::Code => Some(CODE),
+        Tint::Comments => Some(COMMENTS),
+        Tint::Blanks => Some(BLANKS),
+        Tint::Size => Some(SIZE),
+        Tint::Add => Some(ADD),
+        Tint::Del => Some(DEL),
+        Tint::Status => Some(STATUS),
+        Tint::Plain => None,
+    }
 }

@@ -3,14 +3,14 @@ name = "tree-tui"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.87"                  # uses u*::is_multiple_of (stable since 1.87)
-description = "An interactive terminal UI for exploring tokei code statistics."
+description = "An interactive terminal UI for visualizing directories: code, size, and git stats."
 authors = ["Justin Chung"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/getkono/tree-tui"
 homepage = "https://github.com/getkono/tree-tui"
 documentation = "https://docs.rs/tree-tui"
 readme = "README.md"
-keywords = ["tui", "tokei", "ratatui", "cli", "code-statistics"]
+keywords = ["tui", "ratatui", "cli", "directory", "filesystem"]
 categories = ["command-line-utilities", "visualization"]
 # Keep the published tarball to what's needed to build the crate.
 exclude = ["/.github", "/AGENTS.md", "/CLAUDE.md", "/hk.pkl", "/mise.toml", "/release-plz.toml"]
@@ -25,6 +25,12 @@ color-eyre = "0.6.5"
 crossterm = { version = "0.29", features = ["event-stream"] }
 eyre = "0.6.12"
 futures = "0.3"
+# Filesystem walk that honors .gitignore/.ignore (the same crate tokei uses);
+# the tree skeleton + per-file size come from this, independent of language.
+ignore = "0.4"
+# Pure-Rust git (no external binary, no C toolchain) for the churn/status lenses.
+# Keep gix's defaults (they pull in the hash backend) and add what the lenses need.
+gix = { version = "0.84", features = ["revision", "blob-diff", "status", "dirwalk"] }
 ratatui = "0.30.1"
 thiserror = "2.0.18"
 tokei = { version = "14", default-features = false }

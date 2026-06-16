@@ -1,6 +1,4 @@
-//! The summary header: root label, language/file counts, scan time, and totals.
-
-use std::time::Duration;
+//! The summary header: root label, totals, scan time, and the active-lens recap.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -9,22 +7,16 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph};
 
 use super::theme;
-use crate::model::Tree;
+use crate::app::Loaded;
+use crate::model::{Lens, SubKey};
 
-pub fn render(
-    frame: &mut Frame,
-    root_label: &str,
-    tree: &Tree,
-    duration: Duration,
-    inaccurate: bool,
-    area: Rect,
-) {
-    let totals = tree.totals();
-    let language_count = tree.nodes[tree.root].langs.len();
-    let scanned = if duration.as_millis() >= 1000 {
-        format!("{:.2}s", duration.as_secs_f64())
+pub fn render(frame: &mut Frame, root_label: &str, loaded: &Loaded, area: Rect) {
+    let tree = &loaded.tree;
+    let root = tree.root;
+    let scanned = if loaded.duration.as_millis() >= 1000 {
+        format!("{:.2}s", loaded.duration.as_secs_f64())
     } else {
-        format!("{}ms", duration.as_millis())
+        format!("{}ms", loaded.duration.as_millis())
     };
 
     let dot = Span::styled("  ·  ", Style::default().fg(theme::MUTED));
@@ -36,56 +28,114 @@ pub fn render(
                 .add_modifier(Modifier::BOLD),
         ),
         dot.clone(),
-        Span::raw(format!("{language_count} languages")),
+        Span::raw(format!(
+            "{} files",
+            theme::group_thousands(tree.total_files())
+        )),
         dot.clone(),
-        Span::raw(format!("{} files", theme::group_thousands(totals.files))),
-        dot,
+        Span::raw(theme::human_bytes(tree.total_bytes())),
+        dot.clone(),
         Span::styled(
             format!("scanned in {scanned}"),
             Style::default().fg(theme::MUTED),
         ),
     ];
-    if inaccurate {
+    if let Some(code) = loaded.code_at(root) {
+        line1.push(dot);
+        line1.push(Span::styled(
+            format!("{} languages", code.langs.len()),
+            Style::default().fg(theme::MUTED),
+        ));
+    }
+    if loaded.inaccurate {
         line1.push(Span::styled(
             "  ⚠ some files inaccurate",
             Style::default().fg(theme::WARN),
         ));
     }
 
-    let gap = "   ";
-    let label = |text: &'static str| Span::styled(text, Style::default().fg(theme::MUTED));
-    let line2 = Line::from(vec![
-        Span::styled(
-            theme::group_thousands(totals.lines()),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        label(" lines"),
-        Span::raw(gap),
-        Span::styled(
-            theme::group_thousands(totals.code),
-            Style::default().fg(theme::CODE),
-        ),
-        label(" code"),
-        Span::raw(gap),
-        Span::styled(
-            theme::group_thousands(totals.comments),
-            Style::default().fg(theme::COMMENTS),
-        ),
-        label(" comments"),
-        Span::raw(gap),
-        Span::styled(
-            theme::group_thousands(totals.blanks),
-            Style::default().fg(theme::BLANKS),
-        ),
-        label(" blanks"),
-    ]);
-
     let block = Block::bordered()
         .title(" tree ")
         .border_style(Style::default().fg(theme::MUTED))
         .padding(Padding::horizontal(1));
     frame.render_widget(
-        Paragraph::new(vec![Line::from(line1), line2]).block(block),
+        Paragraph::new(vec![Line::from(line1), lens_recap(loaded)]).block(block),
         area,
     );
+}
+
+/// The second header line: a recap of the active lens's grand totals.
+fn lens_recap(loaded: &Loaded) -> Line<'static> {
+    if loaded.active_computing() {
+        return Line::from(Span::styled(
+            format!("computing {}…", loaded.active_lens.label()),
+            Style::default()
+                .fg(theme::WARN)
+                .add_modifier(Modifier::ITALIC),
+        ));
+    }
+
+    let root = loaded.tree.root;
+    let value = |key: SubKey| loaded.value(key, root);
+    let gap = "   ";
+    let label = |text: &'static str| Span::styled(text, Style::default().fg(theme::MUTED));
+    let strong = |value: u128| {
+        Span::styled(
+            theme::group_thousands(value as usize),
+            Style::default().add_modifier(Modifier::BOLD),
+        )
+    };
+    let tinted = |value: u128, color| {
+        Span::styled(
+            theme::group_thousands(value as usize),
+            Style::default().fg(color),
+        )
+    };
+
+    match loaded.active_lens {
+        Lens::Code => Line::from(vec![
+            strong(value(SubKey::Lines)),
+            label(" lines"),
+            Span::raw(gap),
+            tinted(value(SubKey::Code), theme::CODE),
+            label(" code"),
+            Span::raw(gap),
+            tinted(value(SubKey::Comments), theme::COMMENTS),
+            label(" comments"),
+            Span::raw(gap),
+            tinted(value(SubKey::Blanks), theme::BLANKS),
+            label(" blanks"),
+        ]),
+        Lens::Size => Line::from(vec![
+            Span::styled(
+                theme::human_bytes(loaded.tree.total_bytes()),
+                Style::default()
+                    .fg(theme::SIZE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            label(" on disk across "),
+            strong(value(SubKey::Files)),
+            label(" files"),
+        ]),
+        Lens::Churn => Line::from(vec![
+            tinted(value(SubKey::Added), theme::ADD),
+            label(" added"),
+            Span::raw(gap),
+            tinted(value(SubKey::Deleted), theme::DEL),
+            label(" deleted"),
+            Span::raw(gap),
+            strong(value(SubKey::Commits)),
+            label(" commits"),
+        ]),
+        Lens::Status => Line::from(vec![
+            tinted(value(SubKey::StatusAdded), theme::ADD),
+            label(" added"),
+            Span::raw(gap),
+            tinted(value(SubKey::StatusModified), theme::STATUS),
+            label(" modified"),
+            Span::raw(gap),
+            tinted(value(SubKey::StatusDeleted), theme::DEL),
+            label(" deleted"),
+        ]),
+    }
 }

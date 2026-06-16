@@ -1,42 +1,54 @@
 //! View-layer transforms over a built [`Tree`]: sorting and flattening.
+//!
+//! Sorting is driven by a precomputed per-node value slice (indexed by
+//! [`NodeId`]) rather than reading the node directly, so the same routine serves
+//! every lens — the caller decides what each value means (see `app`).
 
 use std::cmp::Ordering;
 
-use super::node::{NodeId, NodeKind, SortDir, SortKey, Tree, TreeNode};
+use super::node::{NodeId, NodeKind, SortDir, Tree, TreeNode};
 
-/// Order every node's children by `key`/`dir` with a deterministic tie-break.
-pub fn sort(tree: &mut Tree, key: SortKey, dir: SortDir) {
+/// Order every node's children by `values[id]` (with a stable name/path
+/// tie-break). `values` must have one entry per node.
+pub fn sort_by_values(tree: &mut Tree, values: &[u128], dir: SortDir) {
+    sort_children(tree, |a, b, nodes| {
+        let primary = values[a].cmp(&values[b]);
+        orient(primary, dir).then_with(|| tie_break(&nodes[a], &nodes[b]))
+    });
+}
+
+/// Order every node's children alphabetically (case-insensitive), then by path.
+pub fn sort_by_name(tree: &mut Tree, dir: SortDir) {
+    sort_children(tree, |a, b, nodes| {
+        let primary = name_key(&nodes[a]).cmp(&name_key(&nodes[b]));
+        orient(primary, dir).then_with(|| nodes[a].rel_path.cmp(&nodes[b].rel_path))
+    });
+}
+
+/// Shared driver: take each node's children out so the comparator can borrow the
+/// arena, sort, then put them back.
+fn sort_children(tree: &mut Tree, cmp: impl Fn(NodeId, NodeId, &[TreeNode]) -> Ordering) {
     for id in 0..tree.nodes.len() {
-        // Take the children out so the comparator can borrow the arena.
         let mut children = std::mem::take(&mut tree.nodes[id].children);
-        children.sort_by(|&a, &b| cmp(&tree.nodes[a], &tree.nodes[b], key, dir));
+        children.sort_by(|&a, &b| cmp(a, b, &tree.nodes));
         tree.nodes[id].children = children;
     }
 }
 
-fn metric(node: &TreeNode, key: SortKey) -> usize {
-    match key {
-        SortKey::Lines => node.stats.lines(),
-        SortKey::Code => node.stats.code,
-        SortKey::Comments => node.stats.comments,
-        SortKey::Blanks => node.stats.blanks,
-        SortKey::Files => node.stats.files,
-        SortKey::Name => 0,
+fn orient(ordering: Ordering, dir: SortDir) -> Ordering {
+    match dir {
+        SortDir::Desc => ordering.reverse(),
+        SortDir::Asc => ordering,
     }
 }
 
-fn cmp(a: &TreeNode, b: &TreeNode, key: SortKey, dir: SortDir) -> Ordering {
-    let primary = match key {
-        SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        _ => metric(a, key).cmp(&metric(b, key)),
-    };
-    let primary = match dir {
-        SortDir::Desc => primary.reverse(),
-        SortDir::Asc => primary,
-    };
-    // Tie-break by name then unique relative path for a stable, total order.
-    primary
-        .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+fn name_key(node: &TreeNode) -> String {
+    node.name.to_lowercase()
+}
+
+fn tie_break(a: &TreeNode, b: &TreeNode) -> Ordering {
+    name_key(a)
+        .cmp(&name_key(b))
         .then_with(|| a.rel_path.cmp(&b.rel_path))
 }
 
@@ -111,51 +123,54 @@ fn push_filtered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::build_tree;
-    use std::path::{Path, PathBuf};
-    use tokei::{Language, LanguageType, Languages, Report};
+    use crate::model::build::build_skeleton;
+    use std::path::PathBuf;
 
-    fn tree() -> Tree {
-        let mk = |path: &str, code: usize| {
-            let mut r = Report::new(PathBuf::from(path));
-            r.stats.code = code;
-            r
-        };
-        let mut rust = Language::new();
-        rust.reports = vec![mk("/p/big.rs", 500), mk("/p/small.rs", 5)];
-        let mut languages = Languages::new();
-        languages.insert(LanguageType::Rust, rust);
-        build_tree(&languages, Path::new("/p"), "p".into())
+    fn rel(p: &str) -> PathBuf {
+        PathBuf::from(p)
+    }
+
+    fn byte_values(tree: &Tree) -> Vec<u128> {
+        tree.nodes.iter().map(|n| n.bytes as u128).collect()
+    }
+
+    fn names(tree: &Tree) -> Vec<String> {
+        flatten_visible(tree)
+            .iter()
+            .map(|&id| tree.nodes[id].name.clone())
+            .collect()
     }
 
     #[test]
-    fn sort_desc_then_reverse_is_deterministic() {
-        let mut t = tree();
-        sort(&mut t, SortKey::Code, SortDir::Desc);
-        let order: Vec<&str> = flatten_visible(&t)
-            .iter()
-            .map(|&id| t.nodes[id].name.as_str())
-            .collect();
-        assert_eq!(order, ["big.rs", "small.rs"]);
+    fn sort_by_value_desc_then_asc_is_deterministic() {
+        let files = vec![(rel("big.rs"), 500), (rel("small.rs"), 5)];
+        let mut tree = build_skeleton(&files, &[], "p".into());
 
-        sort(&mut t, SortKey::Code, SortDir::Asc);
-        let order: Vec<&str> = flatten_visible(&t)
-            .iter()
-            .map(|&id| t.nodes[id].name.as_str())
-            .collect();
-        assert_eq!(order, ["small.rs", "big.rs"]);
+        let values = byte_values(&tree);
+        sort_by_values(&mut tree, &values, SortDir::Desc);
+        assert_eq!(names(&tree), ["big.rs", "small.rs"]);
+
+        sort_by_values(&mut tree, &values, SortDir::Asc);
+        assert_eq!(names(&tree), ["small.rs", "big.rs"]);
     }
 
-    fn nested_tree() -> Tree {
-        let mut rust = Language::new();
-        rust.reports = vec![
-            Report::new(PathBuf::from("/p/src/main.rs")),
-            Report::new(PathBuf::from("/p/src/lib.rs")),
-            Report::new(PathBuf::from("/p/docs/guide.md")),
+    #[test]
+    fn sort_by_value_ranks_a_big_binary_over_small_source() {
+        let files = vec![(rel("main.rs"), 1_200), (rel("logo.png"), 900_000)];
+        let mut tree = build_skeleton(&files, &[], "p".into());
+        let values = byte_values(&tree);
+        sort_by_values(&mut tree, &values, SortDir::Desc);
+        assert_eq!(names(&tree), ["logo.png", "main.rs"]);
+    }
+
+    fn nested() -> Tree {
+        let files = vec![
+            (rel("src/main.rs"), 1),
+            (rel("src/lib.rs"), 1),
+            (rel("docs/guide.md"), 1),
         ];
-        let mut languages = Languages::new();
-        languages.insert(LanguageType::Rust, rust);
-        build_tree(&languages, Path::new("/p"), "p".into())
+        let dirs = vec![rel("src"), rel("docs")];
+        build_skeleton(&files, &dirs, "p".into())
     }
 
     fn filtered_names(tree: &Tree, query: &str) -> Vec<String> {
@@ -167,16 +182,16 @@ mod tests {
 
     #[test]
     fn filter_keeps_matches_and_ancestors() {
-        let names = filtered_names(&nested_tree(), "lib");
-        assert!(names.contains(&"src".to_string())); // ancestor of the match
-        assert!(names.contains(&"lib.rs".to_string())); // the match
-        assert!(!names.contains(&"main.rs".to_string())); // sibling, no match
-        assert!(!names.contains(&"docs".to_string())); // unrelated subtree
+        let names = filtered_names(&nested(), "lib");
+        assert!(names.contains(&"src".to_string()));
+        assert!(names.contains(&"lib.rs".to_string()));
+        assert!(!names.contains(&"main.rs".to_string()));
+        assert!(!names.contains(&"docs".to_string()));
     }
 
     #[test]
     fn filter_reveals_subtree_of_a_matching_dir() {
-        let names = filtered_names(&nested_tree(), "src");
+        let names = filtered_names(&nested(), "src");
         assert!(names.contains(&"src".to_string()));
         assert!(names.contains(&"main.rs".to_string()));
         assert!(names.contains(&"lib.rs".to_string()));

@@ -1,201 +1,278 @@
-//! Construct the directory [`Tree`] from tokei's per-file reports.
+//! Build the directory [`Tree`] skeleton from a filesystem walk, and aggregate
+//! lazily-collected per-file metrics up the tree.
+//!
+//! The skeleton (structure + on-disk size + file tally) comes from the walk, so
+//! *every* non-ignored file appears — not just files a language counter
+//! recognizes. Expensive metrics arrive later as per-file maps and are folded
+//! bottom-up into a per-node [`Layer`](super::Layer) via [`aggregate`] /
+//! [`aggregate_code`].
 
-use std::collections::{BTreeMap, HashMap};
-use std::ffi::OsString;
+use std::cmp::Reverse;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::ops::AddAssign;
 use std::path::{Component, Path, PathBuf};
 
-use tokei::{LanguageType, Languages};
+use super::node::{CodeData, NodeId, Tree, TreeNode};
 
-use super::node::{Stats, Tree, TreeNode};
-
-/// Build a directory tree of aggregated stats from tokei results.
-///
-/// The same file path can be reported under multiple languages (embedded
-/// languages); such reports are merged into a single file node whose stats sum
-/// across languages, with each language's contribution kept in `langs`.
-pub fn build_tree(languages: &Languages, root: &Path, root_label: String) -> Tree {
-    // 1. Merge reports by relative path.
-    #[derive(Default)]
-    struct FileAgg {
-        stats: Stats,
-        langs: BTreeMap<LanguageType, Stats>,
-    }
-    let mut files: HashMap<PathBuf, FileAgg> = HashMap::new();
-    for (lang, language) in languages.iter() {
-        for report in &language.reports {
-            let rel = relative_path(&report.name, root);
-            if rel.as_os_str().is_empty() {
-                continue;
-            }
-            let s = &report.stats;
-            let agg = files.entry(rel).or_default();
-            agg.stats.code += s.code;
-            agg.stats.comments += s.comments;
-            agg.stats.blanks += s.blanks;
-            let entry = agg.langs.entry(*lang).or_default();
-            entry.code += s.code;
-            entry.comments += s.comments;
-            entry.blanks += s.blanks;
-            entry.files = 1;
-        }
-    }
-
-    // 2. Insert each file into the arena, creating directory nodes as needed.
+/// Build the tree skeleton from walked `files` (relative path + size in bytes)
+/// and `dirs` (relative directory paths, so empty directories appear too).
+pub fn build_skeleton(files: &[(PathBuf, u64)], dirs: &[PathBuf], root_label: String) -> Tree {
     let root_id = 0usize;
     let mut nodes: Vec<TreeNode> = vec![TreeNode::dir(root_label, PathBuf::new(), None, 0)];
-    let mut dir_ids: HashMap<PathBuf, usize> = HashMap::new();
+    let mut dir_ids: HashMap<PathBuf, NodeId> = HashMap::new();
     dir_ids.insert(PathBuf::new(), root_id);
 
-    // Deterministic insertion order so the unsorted structure is stable.
-    let mut rels: Vec<PathBuf> = files.keys().cloned().collect();
-    rels.sort();
-    for rel in &rels {
-        let comps: Vec<OsString> = rel
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(s) => Some(s.to_os_string()),
-                _ => None,
-            })
-            .collect();
-        if comps.is_empty() {
-            continue;
-        }
-        let mut parent = root_id;
-        let mut acc = PathBuf::new();
-        for (i, comp) in comps.iter().enumerate() {
-            acc.push(comp);
-            let name = comp.to_string_lossy().into_owned();
-            let is_file = i + 1 == comps.len();
-            if is_file {
-                let agg = &files[rel];
-                let id = nodes.len();
-                let mut node =
-                    TreeNode::file(name, acc.clone(), Some(parent), nodes[parent].depth + 1);
-                node.stats = agg.stats;
-                node.stats.files = 1;
-                node.langs = agg.langs.clone();
-                node.primary_lang = agg
-                    .langs
-                    .iter()
-                    .max_by_key(|(_, s)| s.lines())
-                    .map(|(k, _)| *k);
-                nodes.push(node);
-                nodes[parent].children.push(id);
-            } else if let Some(&existing) = dir_ids.get(&acc) {
-                parent = existing;
-            } else {
-                let id = nodes.len();
-                let node = TreeNode::dir(name, acc.clone(), Some(parent), nodes[parent].depth + 1);
-                nodes.push(node);
-                nodes[parent].children.push(id);
-                dir_ids.insert(acc.clone(), id);
-                parent = id;
-            }
-        }
+    // Directories first (deterministic order) so empty dirs get nodes.
+    let mut dir_list: Vec<&PathBuf> = dirs.iter().collect();
+    dir_list.sort();
+    for dir in dir_list {
+        ensure_dir_chain(dir, &mut nodes, &mut dir_ids);
     }
 
-    // 3. Aggregate stats and language breakdowns bottom-up (deepest first).
-    let mut order: Vec<usize> = (0..nodes.len()).collect();
-    order.sort_by_key(|&id| std::cmp::Reverse(nodes[id].depth));
-    for id in order {
-        let Some(parent) = nodes[id].parent else {
+    // Then files, deterministic order.
+    let mut file_list: Vec<&(PathBuf, u64)> = files.iter().collect();
+    file_list.sort_by(|a, b| a.0.cmp(&b.0));
+    for (rel, bytes) in file_list {
+        let comps = normal_components(rel);
+        let Some((name_os, parents)) = comps.split_last() else {
             continue;
         };
-        let stats = nodes[id].stats;
-        let langs = nodes[id].langs.clone();
-        nodes[parent].stats += stats;
-        for (lang, lang_stats) in langs {
-            *nodes[parent].langs.entry(lang).or_default() += lang_stats;
+        let mut parent = root_id;
+        let mut acc = PathBuf::new();
+        for comp in parents {
+            acc.push(comp);
+            parent = match dir_ids.get(&acc) {
+                Some(&id) => id,
+                None => insert_dir(comp.as_os_str(), &acc, parent, &mut nodes, &mut dir_ids),
+            };
+        }
+        let name = name_os.to_string_lossy().into_owned();
+        let id = nodes.len();
+        let mut node = TreeNode::file(name, rel.clone(), Some(parent), nodes[parent].depth + 1);
+        node.bytes = *bytes;
+        node.files = 1;
+        nodes.push(node);
+        nodes[parent].children.push(id);
+    }
+
+    // Aggregate the always-on metrics (bytes, files) bottom-up.
+    for id in depth_desc(&nodes) {
+        if let Some(parent) = nodes[id].parent {
+            let (bytes, files) = (nodes[id].bytes, nodes[id].files);
+            nodes[parent].bytes += bytes;
+            nodes[parent].files += files;
         }
     }
 
     nodes[root_id].expanded = true;
 
+    let index = nodes
+        .iter()
+        .enumerate()
+        .map(|(id, node)| (node.rel_path.clone(), id))
+        .collect();
     Tree {
         nodes,
         root: root_id,
+        index,
     }
 }
 
-/// `path` relative to `root`, reduced to its normal components. Falls back to
-/// the path's own normal components if it is not under `root`.
-fn relative_path(path: &Path, root: &Path) -> PathBuf {
-    let rel = path.strip_prefix(root).unwrap_or(path);
-    rel.components()
+/// Fold a per-file metric map into one aggregated value per node (summed
+/// bottom-up). File values come from `per_file` keyed by relative path; every
+/// directory ends up holding its subtree's total.
+pub fn aggregate<T>(tree: &Tree, per_file: &HashMap<PathBuf, T>) -> Box<[T]>
+where
+    T: Copy + Default + AddAssign,
+{
+    let mut vals = vec![T::default(); tree.nodes.len()];
+    for (path, &value) in per_file {
+        if let Some(&id) = tree.index.get(path) {
+            vals[id] = value;
+        }
+    }
+    for id in depth_desc(&tree.nodes) {
+        if let Some(parent) = tree.nodes[id].parent {
+            let value = vals[id];
+            vals[parent] += value;
+        }
+    }
+    vals.into_boxed_slice()
+}
+
+/// Like [`aggregate`], but for the code layer: sums line counts *and* merges the
+/// per-language breakdown up the tree. `primary_lang` stays per-file (directories
+/// are colored by kind, not language).
+pub fn aggregate_code(tree: &Tree, per_file: &HashMap<PathBuf, CodeData>) -> Box<[CodeData]> {
+    let mut vals: Vec<CodeData> = vec![CodeData::default(); tree.nodes.len()];
+    for (path, data) in per_file {
+        if let Some(&id) = tree.index.get(path) {
+            vals[id] = data.clone();
+        }
+    }
+    for id in depth_desc(&tree.nodes) {
+        if let Some(parent) = tree.nodes[id].parent {
+            let num = vals[id].num;
+            let langs = vals[id].langs.clone();
+            vals[parent].num += num;
+            for (lang, stats) in langs {
+                *vals[parent].langs.entry(lang).or_default() += stats;
+            }
+        }
+    }
+    vals.into_boxed_slice()
+}
+
+/// Node ids ordered deepest-first, so children are visited before their parents.
+fn depth_desc(nodes: &[TreeNode]) -> Vec<NodeId> {
+    let mut order: Vec<NodeId> = (0..nodes.len()).collect();
+    order.sort_by_key(|&id| Reverse(nodes[id].depth));
+    order
+}
+
+/// The `Component::Normal` parts of a path (drops `.`/`..`/root prefixes).
+fn normal_components(path: &Path) -> Vec<OsString> {
+    path.components()
         .filter_map(|c| match c {
-            Component::Normal(s) => Some(s),
+            Component::Normal(s) => Some(s.to_os_string()),
             _ => None,
         })
         .collect()
 }
 
+/// Ensure a directory node (and all its ancestors) exists; return its id.
+fn ensure_dir_chain(
+    rel: &Path,
+    nodes: &mut Vec<TreeNode>,
+    dir_ids: &mut HashMap<PathBuf, NodeId>,
+) -> NodeId {
+    let mut parent = 0usize;
+    let mut acc = PathBuf::new();
+    for comp in normal_components(rel) {
+        acc.push(&comp);
+        parent = match dir_ids.get(&acc) {
+            Some(&id) => id,
+            None => insert_dir(comp.as_os_str(), &acc, parent, nodes, dir_ids),
+        };
+    }
+    parent
+}
+
+fn insert_dir(
+    name_os: &OsStr,
+    acc: &Path,
+    parent: NodeId,
+    nodes: &mut Vec<TreeNode>,
+    dir_ids: &mut HashMap<PathBuf, NodeId>,
+) -> NodeId {
+    let id = nodes.len();
+    let name = name_os.to_string_lossy().into_owned();
+    let depth = nodes[parent].depth + 1;
+    nodes.push(TreeNode::dir(name, acc.to_path_buf(), Some(parent), depth));
+    nodes[parent].children.push(id);
+    dir_ids.insert(acc.to_path_buf(), id);
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokei::{Language, Report};
+    use crate::model::node::{ChurnData, CodeNum};
+    use tokei::LanguageType;
 
-    fn report(path: &str, code: usize, comments: usize, blanks: usize) -> Report {
-        let mut r = Report::new(PathBuf::from(path));
-        r.stats.code = code;
-        r.stats.comments = comments;
-        r.stats.blanks = blanks;
-        r
+    fn rel(p: &str) -> PathBuf {
+        PathBuf::from(p)
     }
 
-    fn language(reports: Vec<Report>) -> Language {
-        let mut l = Language::new();
-        l.reports = reports;
-        l
+    /// `/proj` with `src/main.rs`, `src/lib.rs`, `README.md`, and a binary
+    /// `assets/logo.png` (size only, no code).
+    fn skeleton() -> Tree {
+        let files = vec![
+            (rel("src/main.rs"), 1000),
+            (rel("src/lib.rs"), 400),
+            (rel("README.md"), 80),
+            (rel("assets/logo.png"), 5000),
+        ];
+        let dirs = vec![rel("src"), rel("assets")];
+        build_skeleton(&files, &dirs, "proj".into())
     }
 
     #[test]
-    fn aggregates_directories_bottom_up() {
-        let mut languages = Languages::new();
-        languages.insert(
-            LanguageType::Rust,
-            language(vec![
-                report("/proj/src/main.rs", 100, 10, 5),
-                report("/proj/src/lib.rs", 40, 4, 2),
-            ]),
-        );
-        languages.insert(
-            LanguageType::Markdown,
-            language(vec![report("/proj/README.md", 8, 0, 3)]),
-        );
-
-        let tree = build_tree(&languages, Path::new("/proj"), "proj".into());
-
-        let totals = tree.totals();
-        assert_eq!(totals.files, 3);
-        assert_eq!(totals.code, 148);
-        assert_eq!(totals.comments, 14);
-        assert_eq!(totals.blanks, 10);
-        assert_eq!(totals.lines(), 172);
+    fn skeleton_aggregates_bytes_and_files() {
+        let tree = skeleton();
+        assert_eq!(tree.total_files(), 4);
+        assert_eq!(tree.total_bytes(), 6480);
 
         let src = tree.nodes.iter().find(|n| n.name == "src").unwrap();
-        assert_eq!(src.stats.files, 2);
-        assert_eq!(src.stats.code, 140);
-        assert_eq!(src.langs.get(&LanguageType::Rust).unwrap().files, 2);
+        assert_eq!(src.files, 2);
+        assert_eq!(src.bytes, 1400);
     }
 
     #[test]
-    fn merges_same_path_across_languages() {
-        let mut languages = Languages::new();
-        languages.insert(
-            LanguageType::Html,
-            language(vec![report("/p/index.html", 10, 1, 1)]),
-        );
-        languages.insert(
-            LanguageType::JavaScript,
-            language(vec![report("/p/index.html", 20, 2, 0)]),
-        );
+    fn non_code_file_appears_with_size_only() {
+        let tree = skeleton();
+        let logo = tree.nodes.iter().find(|n| n.name == "logo.png");
+        assert!(logo.is_some(), "binary file should appear in the tree");
+        assert_eq!(logo.unwrap().bytes, 5000);
 
-        let tree = build_tree(&languages, Path::new("/p"), "p".into());
+        // The code layer is empty for it; aggregation leaves it at zero.
+        let code = aggregate_code(&tree, &HashMap::new());
+        let logo_id = tree.index[&rel("assets/logo.png")];
+        assert_eq!(code[logo_id].num.lines(), 0);
+    }
 
-        // One physical file, counted once, with two language contributions.
-        assert_eq!(tree.totals().files, 1);
-        assert_eq!(tree.totals().code, 30);
-        let file = tree.nodes.iter().find(|n| n.name == "index.html").unwrap();
-        assert_eq!(file.langs.len(), 2);
+    #[test]
+    fn aggregate_sums_a_layer_bottom_up() {
+        let tree = skeleton();
+        let mut per_file = HashMap::new();
+        per_file.insert(
+            rel("src/main.rs"),
+            ChurnData {
+                added: 10,
+                deleted: 2,
+                commits: 3,
+            },
+        );
+        per_file.insert(
+            rel("src/lib.rs"),
+            ChurnData {
+                added: 5,
+                deleted: 1,
+                commits: 1,
+            },
+        );
+        let churn = aggregate(&tree, &per_file);
+
+        let src_id = tree.index[&rel("src")];
+        assert_eq!(churn[src_id].added, 15);
+        assert_eq!(churn[src_id].deleted, 3);
+        assert_eq!(churn[tree.root].commits, 4);
+    }
+
+    #[test]
+    fn aggregate_code_merges_languages() {
+        let tree = skeleton();
+        let mut per_file = HashMap::new();
+        let num = CodeNum {
+            code: 100,
+            comments: 10,
+            blanks: 5,
+        };
+        let mut main = CodeData {
+            num,
+            ..Default::default()
+        };
+        main.langs.insert(LanguageType::Rust, num);
+        per_file.insert(rel("src/main.rs"), main);
+
+        let code = aggregate_code(&tree, &per_file);
+        let src_id = tree.index[&rel("src")];
+        assert_eq!(code[src_id].num.code, 100);
+        assert_eq!(
+            code[src_id].langs.get(&LanguageType::Rust).unwrap().code,
+            100
+        );
+        assert_eq!(code[tree.root].num.lines(), 115);
     }
 }

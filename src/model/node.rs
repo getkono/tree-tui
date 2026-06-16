@@ -1,4 +1,10 @@
-//! Core tree types: nodes, aggregated stats, and sort keys.
+//! Core tree types: the metric-agnostic skeleton plus the per-lens metric
+//! payloads that ride alongside it.
+//!
+//! The tree skeleton ([`TreeNode`]/[`Tree`]) carries only what is cheap to learn
+//! from a single filesystem walk: structure, on-disk `bytes`, and a `files`
+//! tally. Everything more expensive (code lines, git churn, git status) is a
+//! [`Layer`] computed lazily and cached by the application, never on the node.
 
 use std::collections::BTreeMap;
 use std::ops::AddAssign;
@@ -10,31 +16,6 @@ use tokei::LanguageType;
 /// lists are), so an id is a stable identity used to track selection.
 pub type NodeId = usize;
 
-/// Aggregated line counts plus a file tally.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Stats {
-    pub code: usize,
-    pub comments: usize,
-    pub blanks: usize,
-    pub files: usize,
-}
-
-impl Stats {
-    /// Total physical lines (code + comments + blanks).
-    pub fn lines(&self) -> usize {
-        self.code + self.comments + self.blanks
-    }
-}
-
-impl AddAssign for Stats {
-    fn add_assign(&mut self, rhs: Self) {
-        self.code += rhs.code;
-        self.comments += rhs.comments;
-        self.blanks += rhs.blanks;
-        self.files += rhs.files;
-    }
-}
-
 /// Whether a node is a directory or a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeKind {
@@ -42,7 +23,11 @@ pub enum NodeKind {
     File,
 }
 
-/// A single directory or file in the tree.
+/// A single directory or file in the tree skeleton.
+///
+/// `bytes` and `files` are always populated (they come from the walk and are
+/// aggregated bottom-up); all other metrics live in lazily-computed [`Layer`]s
+/// keyed by this node's [`NodeId`].
 #[derive(Debug, Clone)]
 pub struct TreeNode {
     /// The final path component (display name).
@@ -55,12 +40,10 @@ pub struct TreeNode {
     pub parent: Option<NodeId>,
     pub children: Vec<NodeId>,
     pub expanded: bool,
-    /// Aggregated for directories; the file's own counts for files.
-    pub stats: Stats,
-    /// Per-language breakdown (aggregated for dirs, per-file for files).
-    pub langs: BTreeMap<LanguageType, Stats>,
-    /// The dominant language of a file (by line count).
-    pub primary_lang: Option<LanguageType>,
+    /// On-disk size in bytes (aggregated for directories).
+    pub bytes: u64,
+    /// File count (1 for a file; aggregated descendant count for a directory).
+    pub files: usize,
 }
 
 impl TreeNode {
@@ -73,9 +56,8 @@ impl TreeNode {
             parent,
             children: Vec::new(),
             expanded: false,
-            stats: Stats::default(),
-            langs: BTreeMap::new(),
-            primary_lang: None,
+            bytes: 0,
+            files: 0,
         }
     }
 
@@ -96,48 +78,133 @@ impl TreeNode {
 pub struct Tree {
     pub nodes: Vec<TreeNode>,
     pub root: NodeId,
+    /// Maps a relative path to its node id, so collector results (keyed by path)
+    /// can be merged into the arena in O(1) per file.
+    pub index: std::collections::HashMap<PathBuf, NodeId>,
 }
 
 impl Tree {
-    /// Grand totals (the root's aggregated stats).
-    pub fn totals(&self) -> Stats {
-        self.nodes[self.root].stats
+    /// Total on-disk size (the root's aggregated bytes).
+    pub fn total_bytes(&self) -> u64 {
+        self.nodes[self.root].bytes
+    }
+
+    /// Total file count (the root's aggregated tally).
+    pub fn total_files(&self) -> usize {
+        self.nodes[self.root].files
     }
 }
 
-/// The metric used to order siblings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortKey {
-    Lines,
-    Code,
-    Comments,
-    Blanks,
-    Files,
-    Name,
+/// A lazily-computed, cached per-lens metric layer, indexed by [`NodeId`].
+///
+/// `Ready` holds one value per node, already aggregated bottom-up. A layer stays
+/// `NotComputed` until its lens is first opened, becomes `Computing` while a
+/// background collector runs, then `Ready` for the rest of the session.
+#[derive(Debug, Clone, Default)]
+pub enum Layer<T> {
+    #[default]
+    NotComputed,
+    Computing,
+    Ready(Box<[T]>),
 }
 
-impl SortKey {
-    /// The next key in the cycle (driven by the `s` key).
-    pub fn next(self) -> Self {
+impl<T> Layer<T> {
+    /// The aggregated values, once computed.
+    pub fn ready(&self) -> Option<&[T]> {
         match self {
-            SortKey::Lines => SortKey::Code,
-            SortKey::Code => SortKey::Comments,
-            SortKey::Comments => SortKey::Blanks,
-            SortKey::Blanks => SortKey::Files,
-            SortKey::Files => SortKey::Name,
-            SortKey::Name => SortKey::Lines,
+            Layer::Ready(values) => Some(values),
+            _ => None,
         }
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            SortKey::Lines => "lines",
-            SortKey::Code => "code",
-            SortKey::Comments => "comments",
-            SortKey::Blanks => "blanks",
-            SortKey::Files => "files",
-            SortKey::Name => "name",
-        }
+    pub fn is_computing(&self) -> bool {
+        matches!(self, Layer::Computing)
+    }
+}
+
+/// Code line counts (the tokei lens), summed for directories.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodeNum {
+    pub code: usize,
+    pub comments: usize,
+    pub blanks: usize,
+}
+
+impl CodeNum {
+    /// Total physical lines (code + comments + blanks).
+    pub fn lines(&self) -> usize {
+        self.code + self.comments + self.blanks
+    }
+}
+
+impl AddAssign for CodeNum {
+    fn add_assign(&mut self, rhs: Self) {
+        self.code += rhs.code;
+        self.comments += rhs.comments;
+        self.blanks += rhs.blanks;
+    }
+}
+
+/// A node's code layer entry: totals, the per-language breakdown, and (for files)
+/// the dominant language used to color the file glyph.
+#[derive(Debug, Clone, Default)]
+pub struct CodeData {
+    pub num: CodeNum,
+    /// Per-language line counts (aggregated for dirs, per-file for files).
+    pub langs: BTreeMap<LanguageType, CodeNum>,
+    /// The dominant language of a file by line count (files only).
+    pub primary_lang: Option<LanguageType>,
+}
+
+/// Git churn over a window of history: lines added/deleted and how many commits
+/// touched a path. Summed for directories (see the `commits` caveat in
+/// `collect::git`: a directory total double-counts commits touching siblings, so
+/// it is a churn *weight*, not a precise commit count).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChurnData {
+    pub added: u64,
+    pub deleted: u64,
+    pub commits: u64,
+}
+
+impl ChurnData {
+    /// Combined churn weight (added + deleted lines).
+    pub fn churn(&self) -> u64 {
+        self.added + self.deleted
+    }
+}
+
+impl AddAssign for ChurnData {
+    fn add_assign(&mut self, rhs: Self) {
+        self.added += rhs.added;
+        self.deleted += rhs.deleted;
+        self.commits += rhs.commits;
+    }
+}
+
+/// Git working-tree status counts. Summed for directories.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatusData {
+    /// New (untracked or added-to-index) files.
+    pub added: usize,
+    /// Modified / renamed / type-changed files.
+    pub modified: usize,
+    /// Deleted files.
+    pub deleted: usize,
+}
+
+impl StatusData {
+    /// All working-tree changes in this subtree.
+    pub fn total(&self) -> usize {
+        self.added + self.modified + self.deleted
+    }
+}
+
+impl AddAssign for StatusData {
+    fn add_assign(&mut self, rhs: Self) {
+        self.added += rhs.added;
+        self.modified += rhs.modified;
+        self.deleted += rhs.deleted;
     }
 }
 

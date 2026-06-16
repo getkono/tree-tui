@@ -35,12 +35,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     // Copy scalar/owned view state out before borrowing `screen` mutably.
     let root_label = app.root_label.clone();
-    let sort_key = app.sort_key;
-    let sort_dir = app.sort_dir;
     let editing = app.mode == Mode::Filter;
     let Screen::Loaded(loaded) = &mut app.screen else {
         return;
     };
+    let loaded = loaded.as_mut();
 
     let [header_area, body_area, footer_area] = Layout::vertical([
         Constraint::Length(4),
@@ -49,14 +48,7 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     ])
     .areas(area);
 
-    header::render(
-        frame,
-        &root_label,
-        &loaded.tree,
-        loaded.duration,
-        loaded.inaccurate,
-        header_area,
-    );
+    header::render(frame, &root_label, loaded, header_area);
 
     // The detail panel, when shown, takes a fixed column on the right.
     let tree_area = if loaded.show_detail {
@@ -74,19 +66,23 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
         tree_view::render(frame, loaded, tree_area);
     }
 
+    let computing = loaded.active_computing().then_some(loaded.active_lens);
     footer::render(
         frame,
-        sort_key,
-        sort_dir,
+        loaded.active_lens,
+        loaded.sort_key,
+        loaded.sort_dir,
+        loaded.hide_zeros,
         &loaded.filter,
         editing,
+        computing,
         footer_area,
     );
 }
 
 fn render_empty(frame: &mut Frame, filter: &str, area: Rect) {
     let message = if filter.is_empty() {
-        "No countable code found here."
+        "No files found here."
     } else {
         "No matches for this filter."
     };
@@ -134,39 +130,63 @@ fn render_error(frame: &mut Frame, message: &str, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::App;
-    use crate::model::build_tree;
+    use crate::app::{App, Screen};
+    use crate::collect::LayerResult;
+    use crate::model::{CodeData, CodeNum, Lens, build_skeleton};
     use crate::scan::ScanOutcome;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use std::path::{Path, PathBuf};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::time::Duration;
-    use tokei::{Language, LanguageType, Languages, Report};
+    use tokei::LanguageType;
 
-    fn sample_app() -> App {
-        let mk = |path: &str, code: usize, comments: usize, blanks: usize| {
-            let mut r = Report::new(PathBuf::from(path));
-            r.stats.code = code;
-            r.stats.comments = comments;
-            r.stats.blanks = blanks;
-            r
+    fn code_data(lang: LanguageType, code: usize) -> CodeData {
+        let num = CodeNum {
+            code,
+            comments: 0,
+            blanks: 0,
         };
-        let mut rust = Language::new();
-        rust.reports = vec![
-            mk("/proj/src/main.rs", 120, 10, 8),
-            mk("/proj/src/app.rs", 60, 4, 3),
-        ];
-        let mut md = Language::new();
-        md.reports = vec![mk("/proj/README.md", 20, 0, 6)];
-        let mut languages = Languages::new();
-        languages.insert(LanguageType::Rust, rust);
-        languages.insert(LanguageType::Markdown, md);
+        let mut data = CodeData {
+            num,
+            primary_lang: Some(lang),
+            ..Default::default()
+        };
+        data.langs.insert(lang, num);
+        data
+    }
 
-        let tree = build_tree(&languages, Path::new("/proj"), "proj".into());
+    /// A loaded app for `/proj` with the code layer already computed.
+    fn sample_app() -> App {
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 4000),
+            (PathBuf::from("src/app.rs"), 2000),
+            (PathBuf::from("README.md"), 800),
+        ];
+        let dirs = vec![PathBuf::from("src")];
+        let tree = build_skeleton(&files, &dirs, "proj".into());
         let mut app = App::new(PathBuf::from("/proj"), "proj".into());
         app.on_scan(ScanOutcome {
             tree,
             duration: Duration::from_millis(12),
+            repo: false,
+        });
+
+        let mut layer = HashMap::new();
+        layer.insert(
+            PathBuf::from("src/main.rs"),
+            code_data(LanguageType::Rust, 120),
+        );
+        layer.insert(
+            PathBuf::from("src/app.rs"),
+            code_data(LanguageType::Rust, 60),
+        );
+        layer.insert(
+            PathBuf::from("README.md"),
+            code_data(LanguageType::Markdown, 20),
+        );
+        app.on_layer(LayerResult::Code {
+            files: layer,
             inaccurate: false,
         });
         app
@@ -178,20 +198,29 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let view = format!("{}", terminal.backend());
-        // Run `cargo test -- --nocapture` and uncomment to eyeball the layout:
-        // eprintln!("\n{view}");
         assert!(view.contains("tree"));
-        assert!(view.contains("lines"));
+        assert!(view.contains("lines")); // code lens primary column
         assert!(view.contains("src"));
         assert!(view.contains("README.md"));
-        // The languages column renders even when rows are single-language: the
-        // per-row legend ("Markdown") only appears in that column.
         assert!(view.contains("Markdown"));
     }
 
     #[test]
+    fn renders_size_lens_with_human_bytes() {
+        let mut app = sample_app();
+        app.update(crate::action::Action::JumpLens(2)); // size lens
+        if let Screen::Loaded(loaded) = &app.screen {
+            assert_eq!(loaded.active_lens, Lens::Size);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(view.contains("size")); // size lens primary column
+        assert!(view.contains("KB")); // human-readable bytes
+    }
+
+    #[test]
     fn renders_detail_panel_and_help_overlay() {
-        use crate::app::Screen;
         let mut app = sample_app();
         if let Screen::Loaded(loaded) = &mut app.screen {
             loaded.show_detail = true;

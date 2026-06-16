@@ -1,16 +1,36 @@
 # tree-tui
 
-A ratatui-based terminal user interface (TUI).
+A ratatui-based terminal **directory visualizer**: one navigable tree, viewed through swappable
+**lenses** (code lines, on-disk size, git churn, git status). See `docs/ARCHITECTURE.md` for the
+full design.
 
 ## Packages
 
 - **ratatui** — TUI widget, layout, and rendering framework (the app's view layer).
 - **crossterm** — terminal backend: raw mode, input events, alternate screen.
 - **tokio** — async runtime for the input/event loop and concurrent I/O.
+- **ignore** — `.gitignore`-aware filesystem walk; builds the tree skeleton + per-file size.
+- **tokei** — code line counting (the `code` lens collector).
+- **gix** — pure-Rust git; the `churn`/`status` lens collectors.
 - **color-eyre** / **eyre** — colorful error reports and panic hooks at the app boundary.
 - **thiserror** — derive typed error enums for the app's own error types.
 - **tracing** + **tracing-subscriber** — structured logging; pair with **tracing-appender**
   to log to a file, since the TUI owns stdout.
+
+## Architecture
+
+A shared, metric-agnostic core + modular per-tool pieces. The full design, data flow, and recipes
+for adding a lens or collector are in **`docs/ARCHITECTURE.md`**. Key modules:
+
+- `model::node` — arena `Tree`/`TreeNode` skeleton, cached `Layer<T>`, per-lens data structs.
+- `model::lens` — the `Lens`/`SubKey` enums (what each lens shows and how).
+- `model::build` — `build_skeleton` + the bottom-up `aggregate` folds.
+- `collect/` — the modular collectors (`walk`, `code`, `git`) and the lazy `compute` entry point.
+- `app` / `event` — state + reducer, and the lazy-compute engine (request → background collector →
+  cache).
+
+Metrics are computed **lazily** (the first time a lens is opened, on a blocking thread) and **cached**
+for the session — only the cheap walk runs at startup.
 
 ## Quality
 

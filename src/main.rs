@@ -1,11 +1,14 @@
-//! tree — an interactive code-statistics tree TUI powered by tokei.
+//! tree — an interactive directory visualizer for large polyglot repos.
 //!
-//! Invoked as `tree <dir>`. The directory is scanned with tokei and presented
-//! as a navigable, sortable directory tree of code/comment/blank stats.
+//! Invoked as `tree <dir>`. The directory is walked once into a navigable,
+//! sortable tree, then viewed through swappable "lenses" (code lines, on-disk
+//! size, git churn, git status). Each lens's data is computed lazily — the first
+//! time it is opened — and cached for the session.
 
 mod action;
 mod app;
 mod cli;
+mod collect;
 mod editor;
 mod error;
 mod event;

@@ -28,6 +28,12 @@ pub enum Action {
     CollapseAll,
     CycleSort,
     ReverseSort,
+    /// Switch to the next available lens.
+    CycleLens,
+    /// Jump directly to a lens by 1-based index (digit keys).
+    JumpLens(u8),
+    /// Toggle hiding rows that are zero under the active lens.
+    ToggleZeros,
 }
 
 /// Translate a key press into an [`Action`].
@@ -52,6 +58,9 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('C') => Action::CollapseAll,
         KeyCode::Char('s') => Action::CycleSort,
         KeyCode::Char('r') => Action::ReverseSort,
+        KeyCode::Char('m') => Action::CycleLens,
+        KeyCode::Char(c @ '1'..='9') => Action::JumpLens(c as u8 - b'0'),
+        KeyCode::Char('z') => Action::ToggleZeros,
         _ => Action::None,
     }
 }

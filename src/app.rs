@@ -7,13 +7,17 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
 
 use crate::action::{self, Action};
-use crate::model::{self, NodeId, NodeKind, SortDir, SortKey, Tree};
+use crate::collect::LayerResult;
+use crate::model::{
+    self, ChurnData, CodeData, Layer, Lens, NodeId, NodeKind, SortDir, StatusData, SubKey, Tree,
+};
 use crate::scan::ScanOutcome;
 
 /// Which screen the app is currently showing.
 pub enum Screen {
     Loading,
-    Loaded(Loaded),
+    // Boxed: `Loaded` is much larger than the other variants.
+    Loaded(Box<Loaded>),
     Error(String),
 }
 
@@ -28,25 +32,35 @@ pub enum Mode {
 pub struct Loaded {
     pub tree: Tree,
     /// Flattened list of visible node ids (the table's rows). Cached; rebuilt
-    /// only when expansion/sort/filter changes — never on plain cursor movement.
+    /// only when expansion/sort/filter/lens changes — never on plain movement.
     pub visible: Vec<NodeId>,
     pub table_state: TableState,
     /// Rows of tree visible on screen, updated each render; drives paging.
     pub viewport_rows: usize,
     pub duration: Duration,
-    pub inaccurate: bool,
-    /// Whether the language-breakdown detail panel is shown.
+    /// Whether the detail panel is shown.
     pub show_detail: bool,
     /// Active name filter (empty = no filter).
     pub filter: String,
+    /// Hide rows whose value is zero under the active lens.
+    pub hide_zeros: bool,
+    /// The active lens (which metric drives the view).
+    pub active_lens: Lens,
+    /// The sort sub-key (scoped to the active lens).
+    pub sort_key: SubKey,
+    pub sort_dir: SortDir,
+    /// Whether the (computed) code layer reported a parsing ambiguity.
+    pub inaccurate: bool,
+    // Lazily-computed, cached per-lens metric layers.
+    pub code: Layer<CodeData>,
+    pub churn: Layer<ChurnData>,
+    pub status: Layer<StatusData>,
 }
 
 /// Top-level application state.
 pub struct App {
     pub root: PathBuf,
     pub root_label: String,
-    pub sort_key: SortKey,
-    pub sort_dir: SortDir,
     pub screen: Screen,
     pub mode: Mode,
     pub show_help: bool,
@@ -56,6 +70,11 @@ pub struct App {
     /// A file the user asked to open in their editor, drained by the event loop
     /// (which owns the terminal) after each key press.
     pub pending_open: Option<PathBuf>,
+    /// A lens whose data must be computed; drained by the event loop, which
+    /// spawns the background collector.
+    pub pending_compute: Option<Lens>,
+    /// Whether the root is inside a git repository (gates the git lenses).
+    pub repo: bool,
 }
 
 impl App {
@@ -63,8 +82,6 @@ impl App {
         Self {
             root,
             root_label,
-            sort_key: SortKey::Lines,
-            sort_dir: SortDir::Desc,
             screen: Screen::Loading,
             mode: Mode::Normal,
             show_help: false,
@@ -72,32 +89,46 @@ impl App {
             elapsed: Duration::ZERO,
             should_quit: false,
             pending_open: None,
+            pending_compute: None,
+            repo: false,
         }
     }
 
-    /// Transition from `Loading` to `Loaded` once the scan completes.
-    pub fn on_scan(&mut self, outcome: ScanOutcome) {
-        let mut tree = outcome.tree;
-        model::view::sort(&mut tree, self.sort_key, self.sort_dir);
-        let visible = model::view::flatten_visible(&tree);
-        let mut table_state = TableState::default();
-        if !visible.is_empty() {
-            table_state.select(Some(0));
+    /// Whether the app has work in flight (initial walk or a computing lens),
+    /// which keeps the spinner ticking.
+    pub fn is_busy(&self) -> bool {
+        match &self.screen {
+            Screen::Loading => true,
+            Screen::Loaded(loaded) => {
+                loaded.code.is_computing()
+                    || loaded.churn.is_computing()
+                    || loaded.status.is_computing()
+            }
+            Screen::Error(_) => false,
         }
-        self.screen = Screen::Loaded(Loaded {
-            tree,
-            visible,
-            table_state,
-            viewport_rows: 1,
-            duration: outcome.duration,
-            inaccurate: outcome.inaccurate,
-            show_detail: false,
-            filter: String::new(),
-        });
+    }
+
+    /// Transition from `Loading` to `Loaded` once the walk completes, and request
+    /// the default lens's data.
+    pub fn on_scan(&mut self, outcome: ScanOutcome) {
+        self.repo = outcome.repo;
+        let mut loaded = Loaded::new(outcome.tree, outcome.duration);
+        loaded.apply_sort();
+        // The default lens (code) reads a layer; kick off its computation.
+        loaded.mark_computing(loaded.active_lens);
+        self.pending_compute = Some(loaded.active_lens);
+        self.screen = Screen::Loaded(Box::new(loaded));
     }
 
     pub fn on_scan_failed(&mut self, message: impl Into<String>) {
         self.screen = Screen::Error(message.into());
+    }
+
+    /// Apply a freshly-computed lens layer (from a background collector).
+    pub fn on_layer(&mut self, result: LayerResult) {
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.apply_layer(result);
+        }
     }
 
     /// Route a key press: help overlay and filter editing intercept input;
@@ -110,7 +141,6 @@ impl App {
         }
 
         if self.show_help {
-            // Any of these dismiss the overlay; everything else is swallowed.
             if matches!(key.code, KeyCode::Char('?' | 'q') | KeyCode::Esc) {
                 self.show_help = false;
             }
@@ -163,7 +193,6 @@ impl App {
         }
     }
 
-    /// Clear an active filter (Esc in normal mode); a no-op otherwise.
     fn clear_filter(&mut self) {
         if matches!(&self.screen, Screen::Loaded(l) if !l.filter.is_empty()) {
             self.set_filter(String::new());
@@ -182,15 +211,9 @@ impl App {
         match action {
             Action::None => {}
             Action::Quit => self.should_quit = true,
-            Action::CycleSort => {
-                self.sort_key = self.sort_key.next();
-                self.apply_sort();
-            }
-            Action::ReverseSort => {
-                self.sort_dir = self.sort_dir.flip();
-                self.apply_sort();
-            }
             Action::Open => self.open_selected(),
+            Action::CycleLens => self.cycle_lens(),
+            Action::JumpLens(n) => self.jump_lens(n),
             other => {
                 if let Screen::Loaded(loaded) = &mut self.screen {
                     loaded.handle(other);
@@ -199,16 +222,50 @@ impl App {
         }
     }
 
-    fn apply_sort(&mut self) {
+    fn cycle_lens(&mut self) {
+        if let Some(lens) = self.next_available_lens() {
+            self.set_lens(lens);
+        }
+    }
+
+    fn jump_lens(&mut self, n: u8) {
+        let idx = (n as usize).wrapping_sub(1);
+        if let Some(&lens) = Lens::ALL.get(idx)
+            && lens.is_available(self.repo)
+        {
+            self.set_lens(lens);
+        }
+    }
+
+    /// The next lens after the active one that has data to show, or `None` if no
+    /// other lens is available.
+    fn next_available_lens(&self) -> Option<Lens> {
+        let Screen::Loaded(loaded) = &self.screen else {
+            return None;
+        };
+        let mut lens = loaded.active_lens;
+        for _ in 0..Lens::ALL.len() {
+            lens = lens.next();
+            if lens != loaded.active_lens && lens.is_available(self.repo) {
+                return Some(lens);
+            }
+        }
+        None
+    }
+
+    /// Switch the active lens, requesting its layer if not yet computed.
+    fn set_lens(&mut self, lens: Lens) {
         if let Screen::Loaded(loaded) = &mut self.screen {
-            model::view::sort(&mut loaded.tree, self.sort_key, self.sort_dir);
-            loaded.rebuild();
+            loaded.set_lens(lens);
+            if lens.has_layer() && loaded.layer_not_computed(lens) {
+                loaded.mark_computing(lens);
+                self.pending_compute = Some(lens);
+            }
         }
     }
 
     /// Enter on the selection: expand/descend a directory, or queue the selected
-    /// file to open in the user's editor. The event loop owns the terminal and
-    /// performs the actual suspend-and-launch.
+    /// file to open in the user's editor.
     fn open_selected(&mut self) {
         let Screen::Loaded(loaded) = &mut self.screen else {
             return;
@@ -226,6 +283,26 @@ impl App {
 }
 
 impl Loaded {
+    fn new(tree: Tree, duration: Duration) -> Self {
+        Self {
+            tree,
+            visible: Vec::new(),
+            table_state: TableState::default(),
+            viewport_rows: 1,
+            duration,
+            show_detail: false,
+            filter: String::new(),
+            hide_zeros: false,
+            active_lens: Lens::Code,
+            sort_key: Lens::Code.default_sub_key(),
+            sort_dir: SortDir::Desc,
+            inaccurate: false,
+            code: Layer::NotComputed,
+            churn: Layer::NotComputed,
+            status: Layer::NotComputed,
+        }
+    }
+
     /// The id of the currently selected node, if any.
     pub fn selected_id(&self) -> Option<NodeId> {
         self.table_state
@@ -233,16 +310,130 @@ impl Loaded {
             .and_then(|i| self.visible.get(i).copied())
     }
 
-    /// Recompute the visible list, keeping the selection on the same node when
-    /// possible and otherwise clamping into range.
+    /// The value of `key` for node `id`, reading the node fields or the relevant
+    /// cached layer (zero until that layer is `Ready`).
+    pub fn value(&self, key: SubKey, id: NodeId) -> u128 {
+        match key {
+            SubKey::Bytes => self.tree.nodes[id].bytes as u128,
+            SubKey::Files => self.tree.nodes[id].files as u128,
+            SubKey::Name => 0,
+            SubKey::Lines => self.code_at(id).map_or(0, |c| c.num.lines()) as u128,
+            SubKey::Code => self.code_at(id).map_or(0, |c| c.num.code) as u128,
+            SubKey::Comments => self.code_at(id).map_or(0, |c| c.num.comments) as u128,
+            SubKey::Blanks => self.code_at(id).map_or(0, |c| c.num.blanks) as u128,
+            SubKey::Added => self.churn_at(id).map_or(0, |c| c.added) as u128,
+            SubKey::Deleted => self.churn_at(id).map_or(0, |c| c.deleted) as u128,
+            SubKey::Churn => self.churn_at(id).map_or(0, |c| c.churn()) as u128,
+            SubKey::Commits => self.churn_at(id).map_or(0, |c| c.commits) as u128,
+            SubKey::StatusAdded => self.status_at(id).map_or(0, |s| s.added) as u128,
+            SubKey::StatusModified => self.status_at(id).map_or(0, |s| s.modified) as u128,
+            SubKey::StatusDeleted => self.status_at(id).map_or(0, |s| s.deleted) as u128,
+            SubKey::StatusTotal => self.status_at(id).map_or(0, |s| s.total()) as u128,
+        }
+    }
+
+    /// The active lens's headline value for node `id` (the bar / zero-test value).
+    pub fn primary_value(&self, id: NodeId) -> u128 {
+        self.value(self.active_lens.primary().key, id)
+    }
+
+    /// The code layer entry for a node, if the code layer is computed.
+    pub fn code_at(&self, id: NodeId) -> Option<&CodeData> {
+        self.code.ready().map(|values| &values[id])
+    }
+
+    /// The churn layer entry for a node, if the churn layer is computed.
+    pub fn churn_at(&self, id: NodeId) -> Option<&ChurnData> {
+        self.churn.ready().map(|values| &values[id])
+    }
+
+    /// The status layer entry for a node, if the status layer is computed.
+    pub fn status_at(&self, id: NodeId) -> Option<&StatusData> {
+        self.status.ready().map(|values| &values[id])
+    }
+
+    /// Whether the active lens's layer is still being computed.
+    pub fn active_computing(&self) -> bool {
+        match self.active_lens {
+            Lens::Code => self.code.is_computing(),
+            Lens::Churn => self.churn.is_computing(),
+            Lens::Status => self.status.is_computing(),
+            Lens::Size => false,
+        }
+    }
+
+    fn layer_not_computed(&self, lens: Lens) -> bool {
+        match lens {
+            Lens::Code => matches!(self.code, Layer::NotComputed),
+            Lens::Churn => matches!(self.churn, Layer::NotComputed),
+            Lens::Status => matches!(self.status, Layer::NotComputed),
+            Lens::Size => false,
+        }
+    }
+
+    fn mark_computing(&mut self, lens: Lens) {
+        match lens {
+            Lens::Code => self.code = Layer::Computing,
+            Lens::Churn => self.churn = Layer::Computing,
+            Lens::Status => self.status = Layer::Computing,
+            Lens::Size => {}
+        }
+    }
+
+    fn apply_layer(&mut self, result: LayerResult) {
+        let lens = result.lens();
+        match result {
+            LayerResult::Code { files, inaccurate } => {
+                self.code = Layer::Ready(model::aggregate_code(&self.tree, &files));
+                self.inaccurate = inaccurate;
+            }
+            LayerResult::Churn(files) => {
+                self.churn = Layer::Ready(model::aggregate(&self.tree, &files));
+            }
+            LayerResult::Status(files) => {
+                self.status = Layer::Ready(model::aggregate(&self.tree, &files));
+            }
+        }
+        // Re-sort if the data we just got drives the current view.
+        if lens == self.active_lens {
+            self.apply_sort();
+        }
+    }
+
+    fn set_lens(&mut self, lens: Lens) {
+        self.active_lens = lens;
+        self.sort_key = lens.default_sub_key();
+        self.apply_sort();
+    }
+
+    /// Re-order siblings by the current sort key/direction, then rebuild the
+    /// visible list.
+    fn apply_sort(&mut self) {
+        if self.sort_key == SubKey::Name {
+            model::view::sort_by_name(&mut self.tree, self.sort_dir);
+        } else {
+            let values: Vec<u128> = (0..self.tree.nodes.len())
+                .map(|id| self.value(self.sort_key, id))
+                .collect();
+            model::view::sort_by_values(&mut self.tree, &values, self.sort_dir);
+        }
+        self.rebuild();
+    }
+
+    /// Recompute the visible list (honoring filter + declutter), keeping the
+    /// selection on the same node when possible.
     fn rebuild(&mut self) {
         let previous_id = self.selected_id();
         let previous_index = self.table_state.selected();
-        self.visible = if self.filter.is_empty() {
+        let mut visible = if self.filter.is_empty() {
             model::view::flatten_visible(&self.tree)
         } else {
             model::view::flatten_filtered(&self.tree, &self.filter)
         };
+        if self.hide_zeros {
+            visible.retain(|&id| self.primary_value(id) > 0);
+        }
+        self.visible = visible;
         if self.visible.is_empty() {
             self.table_state.select(None);
             return;
@@ -268,6 +459,18 @@ impl Loaded {
             Action::Toggle => self.toggle(),
             Action::ExpandAll => self.set_all_expanded(true),
             Action::CollapseAll => self.collapse_all(),
+            Action::CycleSort => {
+                self.sort_key = self.active_lens.next_sub_key(self.sort_key);
+                self.apply_sort();
+            }
+            Action::ReverseSort => {
+                self.sort_dir = self.sort_dir.flip();
+                self.apply_sort();
+            }
+            Action::ToggleZeros => {
+                self.hide_zeros = !self.hide_zeros;
+                self.rebuild();
+            }
             _ => {}
         }
     }
@@ -357,28 +560,27 @@ impl Loaded {
 mod tests {
     use super::*;
     use crate::action::Action;
-    use crate::model::build_tree;
-    use crate::scan::ScanOutcome;
-    use std::path::{Path, PathBuf};
-    use tokei::{Language, LanguageType, Languages, Report};
+    use crate::collect::LayerResult;
+    use crate::model::{CodeData, CodeNum, build_skeleton};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
     /// A loaded app for `/proj` with `src/main.rs` and a top-level `README.md`.
     fn sample_app() -> App {
-        let mut rust = Language::new();
-        rust.reports = vec![Report::new(PathBuf::from("/proj/src/main.rs"))];
-        let mut md = Language::new();
-        md.reports = vec![Report::new(PathBuf::from("/proj/README.md"))];
-        let mut languages = Languages::new();
-        languages.insert(LanguageType::Rust, rust);
-        languages.insert(LanguageType::Markdown, md);
-
-        let tree = build_tree(&languages, Path::new("/proj"), "proj".into());
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 1000),
+            (PathBuf::from("README.md"), 200),
+        ];
+        let dirs = vec![PathBuf::from("src")];
+        let tree = build_skeleton(&files, &dirs, "proj".into());
         let mut app = App::new(PathBuf::from("/proj"), "proj".into());
         app.on_scan(ScanOutcome {
             tree,
             duration: Duration::ZERO,
-            inaccurate: false,
+            repo: false,
         });
+        // Simulate the event loop draining the initial code request.
+        app.pending_compute = None;
         app
     }
 
@@ -404,6 +606,26 @@ mod tests {
             .any(|&id| loaded.tree.nodes[id].name == name)
     }
 
+    fn active_lens(app: &App) -> Lens {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.active_lens
+    }
+
+    #[test]
+    fn on_scan_requests_the_default_code_lens() {
+        let tree = build_skeleton(&[(PathBuf::from("a.rs"), 1)], &[], "p".into());
+        let mut app = App::new(PathBuf::from("/p"), "p".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+        });
+        assert_eq!(app.pending_compute, Some(Lens::Code));
+        assert!(app.is_busy());
+    }
+
     #[test]
     fn enter_on_a_file_queues_it_for_the_editor() {
         let mut app = sample_app();
@@ -415,11 +637,82 @@ mod tests {
     #[test]
     fn enter_on_a_directory_expands_without_queuing() {
         let mut app = sample_app();
-        // `src` starts collapsed, so its child is not yet visible.
         assert!(!is_visible(&app, "main.rs"));
         select(&mut app, "src");
         app.update(Action::Open);
         assert!(app.pending_open.is_none());
         assert!(is_visible(&app, "main.rs"));
+    }
+
+    #[test]
+    fn cycle_lens_advances_to_size_and_does_not_recompute() {
+        let mut app = sample_app(); // repo = false
+        app.update(Action::CycleLens);
+        assert_eq!(active_lens(&app), Lens::Size);
+        // Size needs no layer, so nothing is requested.
+        assert!(app.pending_compute.is_none());
+    }
+
+    #[test]
+    fn jump_to_unavailable_git_lens_is_a_noop() {
+        let mut app = sample_app(); // repo = false → churn (3) unavailable
+        app.update(Action::JumpLens(3));
+        assert_eq!(active_lens(&app), Lens::Code);
+    }
+
+    #[test]
+    fn git_lens_is_available_and_requested_in_a_repo() {
+        let mut app = sample_app();
+        app.repo = true;
+        app.pending_compute = None;
+        app.update(Action::JumpLens(3)); // churn
+        assert_eq!(active_lens(&app), Lens::Churn);
+        assert_eq!(app.pending_compute, Some(Lens::Churn));
+    }
+
+    #[test]
+    fn reactivating_a_computed_lens_does_not_request_again() {
+        let mut app = sample_app();
+        // Code is currently Computing (from on_scan). Switch to Size and back.
+        app.update(Action::CycleLens); // -> Size
+        app.update(Action::JumpLens(1)); // -> Code (still Computing, not NotComputed)
+        assert_eq!(active_lens(&app), Lens::Code);
+        assert!(app.pending_compute.is_none());
+    }
+
+    #[test]
+    fn on_layer_caches_code_and_sorts_by_lines() {
+        let mut app = sample_app();
+        let mut files = HashMap::new();
+        let main = CodeData {
+            num: CodeNum {
+                code: 100,
+                comments: 0,
+                blanks: 0,
+            },
+            ..Default::default()
+        };
+        files.insert(PathBuf::from("src/main.rs"), main);
+        app.on_layer(LayerResult::Code {
+            files,
+            inaccurate: false,
+        });
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        assert!(loaded.code_at(loaded.tree.root).is_some());
+        // src (100 lines) sorts above README.md (0) under the code lens.
+        let src_id = loaded.tree.index[&PathBuf::from("src")];
+        assert_eq!(loaded.value(SubKey::Lines, src_id), 100);
+    }
+
+    #[test]
+    fn toggle_zeros_hides_zero_value_rows() {
+        let mut app = sample_app(); // code not ready → all lines zero
+        // Under the code lens with no data, decluttering hides everything.
+        app.update(Action::ToggleZeros);
+        assert!(!is_visible(&app, "src"));
+        app.update(Action::ToggleZeros);
+        assert!(is_visible(&app, "src"));
     }
 }
