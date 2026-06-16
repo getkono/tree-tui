@@ -19,7 +19,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
       - name: Format check
         run: mise run fmt-check
       - name: Clippy
@@ -37,6 +37,6 @@ jobs:
         with:
           fetch-depth: 0 # convco needs full history to walk the commit range
       # mise provisions convco (see mise.toml); the build is cached across runs.
-      - uses: jdx/mise-action@v2
+      - uses: jdx/mise-action@v4
       - name: Conventional Commits check
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
