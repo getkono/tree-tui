@@ -81,7 +81,7 @@ pub fn render(
     ]);
 
     let block = Block::bordered()
-        .title(" tree-tui ")
+        .title(" tree ")
         .border_style(Style::default().fg(theme::MUTED))
         .padding(Padding::horizontal(1));
     frame.render_widget(
