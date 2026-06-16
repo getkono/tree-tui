@@ -1,0 +1,68 @@
+name: Release-plz
+
+# On every push to master, release-plz either opens/updates a "release PR" (version bump +
+# CHANGELOG) or, once that PR is merged, publishes the new version to crates.io and cuts a
+# GitHub Release + tag. See release-plz.toml for behaviour and docs at https://release-plz.dev.
+on:
+  push:
+    branches:
+      - master
+
+permissions: {}
+
+jobs:
+  # Publish unreleased versions when a release PR is merged.
+  release-plz-release:
+    name: Release-plz release
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'getkono' }}
+    permissions:
+      contents: write # push tags, create the GitHub Release
+      id-token: write # crates.io Trusted Publishing (OIDC) — no long-lived token in CI
+      pull-requests: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          # PAT (RELEASE_PLZ_TOKEN) lets the GitHub Release/tag steps run with full rights;
+          # falls back to the built-in token until the PAT secret is added.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+          # No CARGO_REGISTRY_TOKEN: release-plz performs the crates.io OIDC token exchange
+          # itself (only when it actually publishes), using the id-token permission above.
+
+  # Open/update the release PR (bumped version + changelog) for the next release.
+  release-plz-pr:
+    name: Release-plz PR
+    runs-on: ubuntu-latest
+    if: ${{ github.repository_owner == 'getkono' }}
+    permissions:
+      contents: write # push the release branch
+      pull-requests: write # open/update the release PR
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          # A PAT (not the built-in GITHUB_TOKEN) is required for CI to run on the release PR,
+          # so branch protection can gate it. Falls back until the PAT secret is added.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
