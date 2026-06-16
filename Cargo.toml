@@ -2,6 +2,18 @@
 name = "tree-tui"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.87"                  # uses u*::is_multiple_of (stable since 1.87)
+description = "An interactive terminal UI for exploring tokei code statistics."
+authors = ["Justin Chung"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/getkono/tree-tui"
+homepage = "https://github.com/getkono/tree-tui"
+documentation = "https://docs.rs/tree-tui"
+readme = "README.md"
+keywords = ["tui", "tokei", "ratatui", "cli", "code-statistics"]
+categories = ["command-line-utilities", "visualization"]
+# Keep the published tarball to what's needed to build the crate.
+exclude = ["/.github", "/AGENTS.md", "/CLAUDE.md", "/hk.pkl", "/mise.toml", "/release-plz.toml"]
 
 # The binary is invoked as `tree <dir>` (note: shadows the system `tree` once installed).
 [[bin]]

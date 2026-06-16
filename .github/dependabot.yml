@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Rust dependencies. `chore` prefix keeps Dependabot commits Conventional-Commit clean
+  # (enforced by convco at commit-msg/pre-push and the commit-lint CI job).
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+    open-pull-requests-limit: 5
+
+  # GitHub Actions used by the CI and release workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5
