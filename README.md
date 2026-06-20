@@ -6,7 +6,7 @@ of code, on-disk size, git churn, git working-tree status — each aggregated up
 can see *where* things actually concentrate.
 
 ```
-tree <dir>
+tree [dir]   # dir defaults to the current directory
 ```
 
 Press `m` to cycle lenses (or `1`–`4` to jump). Every file shows up — source, binaries, images,
@@ -51,18 +51,18 @@ mise run install   # cargo install --path . --force  →  installs the `tree` bi
 ```
 
 > **Note:** the binary is named `tree`, so once installed it shadows the classic `tree` command on
-> your `PATH`. That's intentional (`tree <dir>` is the spec); rename the binary in `Cargo.toml`
+> your `PATH`. That's intentional (`tree [dir]` is the spec); rename the binary in `Cargo.toml`
 > (`[[bin]]`) if you'd rather keep both.
 
 ## Usage
 
 ```bash
-tree <dir>          # explore <dir> through swappable lenses
+tree [dir]          # explore [dir] (default: .) through swappable lenses
 tree -V, --version  # print version + build info (commit, build time, profile, rustc, target)
 tree -h, --help     # print usage
 ```
 
-The syntax is strict: exactly one directory, no unknown flags. Anything else prints usage and exits 2.
+The syntax is strict: at most one directory, no unknown flags. Anything else prints usage and exits 2.
 
 ### Keybindings
 

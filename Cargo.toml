@@ -15,7 +15,7 @@ categories = ["command-line-utilities", "visualization"]
 # Keep the published tarball to what's needed to build the crate.
 exclude = ["/.github", "/AGENTS.md", "/CLAUDE.md", "/hk.pkl", "/mise.toml", "/release-plz.toml"]
 
-# The binary is invoked as `tree <dir>` (note: shadows the system `tree` once installed).
+# The binary is invoked as `tree [dir]` (note: shadows the system `tree` once installed).
 [[bin]]
 name = "tree"
 path = "src/main.rs"
