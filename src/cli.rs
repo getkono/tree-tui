@@ -1,10 +1,10 @@
-//! Strict command-line parsing: `tree <dir>` plus `-V/--version` and `-h/--help`.
+//! Strict command-line parsing: `tree [dir]` plus `-V/--version` and `-h/--help`.
 //!
-//! The grammar is intentionally tight — exactly one positional directory, no
-//! unknown flags, no extra positionals. Anything else is a [`CliError`] that
-//! `main` renders to stderr alongside [`usage`] with a non-zero exit code.
-//! Parsing is pure (no filesystem access) so it is trivially unit-testable;
-//! the directory is validated separately by `main`.
+//! The grammar is intentionally tight — at most one positional directory
+//! (defaulting to `.`), no unknown flags, no extra positionals. Anything else is
+//! a [`CliError`] that `main` renders to stderr alongside [`usage`] with a
+//! non-zero exit code. Parsing is pure (no filesystem access) so it is trivially
+//! unit-testable; the directory is validated separately by `main`.
 
 use std::path::PathBuf;
 
@@ -25,9 +25,6 @@ pub enum Command {
 /// A command-line parsing failure.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum CliError {
-    /// No positional directory was supplied.
-    #[error("missing required <dir> argument")]
-    MissingDir,
     /// More than one positional argument was supplied.
     #[error("unexpected extra argument: {0:?}")]
     ExtraArg(String),
@@ -39,7 +36,8 @@ pub enum CliError {
 /// Parse arguments (everything after `argv[0]`).
 ///
 /// `-V`/`-h` are terminal: they win as soon as they are seen, regardless of
-/// surrounding positionals.
+/// surrounding positionals. The directory is optional and defaults to `.`, so
+/// bare `tree` is equivalent to `tree .`.
 pub fn parse<I, S>(args: I) -> Result<Command, CliError>
 where
     I: IntoIterator<Item = S>,
@@ -56,12 +54,9 @@ where
             _ => dir = Some(arg),
         }
     }
-    match dir {
-        Some(dir) => Ok(Command::Run {
-            dir: PathBuf::from(dir),
-        }),
-        None => Err(CliError::MissingDir),
-    }
+    Ok(Command::Run {
+        dir: PathBuf::from(dir.unwrap_or_else(|| ".".to_string())),
+    })
 }
 
 /// The multi-line usage string.
@@ -70,7 +65,7 @@ pub fn usage() -> String {
         "{BIN_NAME} — interactive directory visualizer (code, size, git)\n\
          \n\
          usage:\n  \
-           {BIN_NAME} <dir>           explore <dir> through swappable lenses\n  \
+           {BIN_NAME} [dir]           explore [dir] (default: .) through swappable lenses\n  \
            {BIN_NAME} -V, --version   print version and build info\n  \
            {BIN_NAME} -h, --help      print this help"
     )
@@ -110,8 +105,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_dir_is_an_error() {
-        assert_eq!(parse_args(&[]), Err(CliError::MissingDir));
+    fn missing_dir_defaults_to_cwd() {
+        assert_eq!(parse_args(&[]).unwrap(), Command::Run { dir: ".".into() });
     }
 
     #[test]

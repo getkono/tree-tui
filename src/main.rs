@@ -1,6 +1,6 @@
 //! tree — an interactive directory visualizer for large polyglot repos.
 //!
-//! Invoked as `tree <dir>`. The directory is walked once into a navigable,
+//! Invoked as `tree [dir]` (defaulting to `.`). The directory is walked once into a navigable,
 //! sortable tree, then viewed through swappable "lenses" (code lines, on-disk
 //! size, git churn, git status). Each lens's data is computed lazily — the first
 //! time it is opened — and cached for the session.
