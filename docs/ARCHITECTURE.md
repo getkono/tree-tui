@@ -30,7 +30,9 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
 - `model::node` — the arena `Tree` / `TreeNode` skeleton, the always-on `bytes`/`files`, the cached
   `Layer<T>` type, and the per-lens data structs (`CodeData`, `ChurnData`, `StatusData`).
 - `model::build` — `build_skeleton` plus the generic bottom-up folds `aggregate` / `aggregate_code`.
-- `model::view` — `sort_by_values` / `sort_by_name` and the visible/filtered flattening.
+- `model::view` — `sort_by_values` / `sort_by_name` and the visible/filtered flattening. A
+  directory whose only child is a single sub-directory is **concatenated** with it into one row
+  (`src/main/java`); the chain expands/collapses as a unit (see `segment_tail` / `segment_head`).
 - `app` — state, the reducer, the lazy-compute request/cache wiring, and `Loaded::value` (the one
   place that maps a `SubKey` to the node field or layer it reads).
 - `event` — the `tokio::select!` loop: input, walk completion, lens results, spinner ticks.

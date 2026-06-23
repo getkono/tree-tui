@@ -52,8 +52,97 @@ fn tie_break(a: &TreeNode, b: &TreeNode) -> Ordering {
         .then_with(|| a.rel_path.cmp(&b.rel_path))
 }
 
-/// Depth-first list of currently visible nodes — the root's descendants,
-/// honoring each directory's `expanded` flag. The root itself is not emitted.
+/// The single child of `id` when that child is a directory — the link that
+/// folds a sole sub-directory into its parent's display row. `None` if `id` has
+/// no children, several children, or a single *file* child.
+fn single_dir_child(tree: &Tree, id: NodeId) -> Option<NodeId> {
+    match tree.nodes[id].children.as_slice() {
+        [only] if tree.nodes[*only].kind == NodeKind::Dir => Some(*only),
+        _ => None,
+    }
+}
+
+/// Whether `id` is a directory folded into its parent's row: the sole child of a
+/// *displayed* directory. The root is never displayed, so top-level entries
+/// always begin their own row rather than concatenating with the root.
+fn is_absorbed(tree: &Tree, id: NodeId) -> bool {
+    let node = &tree.nodes[id];
+    node.kind == NodeKind::Dir
+        && matches!(node.parent, Some(p) if p != tree.root && tree.nodes[p].children.len() == 1)
+}
+
+/// The last directory in `head`'s chain of sole sub-directories — the node whose
+/// children appear when the chained row is expanded. For a row that is not a
+/// chain (a file, or a branching directory) this is `head` itself.
+pub fn segment_tail(tree: &Tree, head: NodeId) -> NodeId {
+    let mut tail = head;
+    while let Some(child) = single_dir_child(tree, tail) {
+        tail = child;
+    }
+    tail
+}
+
+/// The display row `id` belongs to: walk up through absorbed sole sub-directory
+/// links to the chain head — the node that actually owns a row.
+pub fn segment_head(tree: &Tree, mut id: NodeId) -> NodeId {
+    while is_absorbed(tree, id) {
+        id = tree.nodes[id]
+            .parent
+            .expect("an absorbed node has a parent");
+    }
+    id
+}
+
+/// The concatenated display name for the row headed by `id`: a chain of sole
+/// sub-directories joined with `/` (e.g. `src/main/java`). Files and branching
+/// directories render as just their own name.
+pub fn row_name(tree: &Tree, id: NodeId) -> String {
+    let mut name = tree.nodes[id].name.clone();
+    let mut tail = id;
+    while let Some(child) = single_dir_child(tree, tail) {
+        name.push('/');
+        name.push_str(&tree.nodes[child].name);
+        tail = child;
+    }
+    name
+}
+
+/// A row's indentation level, counted in *displayed* ancestors rather than raw
+/// path depth, so a chained child sits one level under its `a/b/c` row instead
+/// of three.
+pub fn display_depth(tree: &Tree, id: NodeId) -> usize {
+    let mut depth = 0;
+    let mut cur = tree.nodes[id].parent;
+    while let Some(p) = cur {
+        if p == tree.root {
+            break;
+        }
+        if !is_absorbed(tree, p) {
+            depth += 1;
+        }
+        cur = tree.nodes[p].parent;
+    }
+    depth
+}
+
+/// Whether any directory in the row headed by `id` has a name containing
+/// `query` (already lower-cased) — a match on `main` reveals all of `src/main`.
+fn segment_name_matches(tree: &Tree, id: NodeId, query: &str) -> bool {
+    let mut cur = id;
+    loop {
+        if tree.nodes[cur].name.to_lowercase().contains(query) {
+            return true;
+        }
+        match single_dir_child(tree, cur) {
+            Some(child) => cur = child,
+            None => return false,
+        }
+    }
+}
+
+/// Depth-first list of currently visible rows — the root's descendants, honoring
+/// each row's `expanded` flag. A chain of sole sub-directories is one row, so an
+/// expanded chain reveals its *tail's* children; the root itself is not emitted.
 pub fn flatten_visible(tree: &Tree) -> Vec<NodeId> {
     let mut out = Vec::new();
     let mut stack: Vec<NodeId> = tree.nodes[tree.root]
@@ -66,7 +155,8 @@ pub fn flatten_visible(tree: &Tree) -> Vec<NodeId> {
         out.push(id);
         let node = &tree.nodes[id];
         if node.kind == NodeKind::Dir && node.expanded {
-            stack.extend(node.children.iter().rev().copied());
+            let tail = segment_tail(tree, id);
+            stack.extend(tree.nodes[tail].children.iter().rev().copied());
         }
     }
     out
@@ -113,9 +203,12 @@ fn push_filtered(
         return;
     }
     out.push(id);
-    let own = tree.nodes[id].name.to_lowercase().contains(query);
+    // A chain is one row: its children live under the tail, and a match on any
+    // segment of the chain reveals the whole subtree.
+    let tail = segment_tail(tree, id);
+    let own = segment_name_matches(tree, id, query);
     let child_under = under_match || own;
-    for &child in &tree.nodes[id].children {
+    for &child in &tree.nodes[tail].children {
         push_filtered(tree, child, child_under, has_match, query, out);
     }
 }
@@ -171,6 +264,68 @@ mod tests {
         ];
         let dirs = vec![rel("src"), rel("docs")];
         build_skeleton(&files, &dirs, "p".into())
+    }
+
+    fn row_names(tree: &Tree) -> Vec<String> {
+        flatten_visible(tree)
+            .iter()
+            .map(|&id| row_name(tree, id))
+            .collect()
+    }
+
+    /// `a/b/c/deep.rs`: a is a top-level head, b and c are sole sub-directories
+    /// folded into it, and the chain stops at `c` (whose only child is a file).
+    fn chained() -> Tree {
+        let files = vec![(rel("a/b/c/deep.rs"), 1)];
+        let dirs = vec![rel("a"), rel("a/b"), rel("a/b/c")];
+        build_skeleton(&files, &dirs, "p".into())
+    }
+
+    #[test]
+    fn chain_concatenates_sole_subdirs_into_one_row() {
+        let tree = chained();
+        let a = tree.index[&rel("a")];
+        assert_eq!(row_name(&tree, a), "a/b/c");
+        assert_eq!(segment_tail(&tree, a), tree.index[&rel("a/b/c")]);
+        // b and c are folded into a's row, not rows of their own.
+        assert_eq!(segment_head(&tree, tree.index[&rel("a/b")]), a);
+        assert_eq!(segment_head(&tree, tree.index[&rel("a/b/c")]), a);
+    }
+
+    #[test]
+    fn chain_expands_as_one_unit_with_compact_indent() {
+        let mut tree = chained();
+        let a = tree.index[&rel("a")];
+        // Collapsed: just the single concatenated row.
+        assert_eq!(row_names(&tree), ["a/b/c"]);
+        // Expanding the head reveals the tail's child, indented one level under it.
+        tree.nodes[a].expanded = true;
+        assert_eq!(row_names(&tree), ["a/b/c", "deep.rs"]);
+        assert_eq!(display_depth(&tree, a), 0);
+        assert_eq!(display_depth(&tree, tree.index[&rel("a/b/c/deep.rs")]), 1);
+    }
+
+    #[test]
+    fn branching_or_file_only_dirs_do_not_chain() {
+        // Two sub-directories under `a` → not a sole-child chain.
+        let branching = build_skeleton(
+            &[(rel("a/x/one.rs"), 1), (rel("a/y/two.rs"), 1)],
+            &[rel("a"), rel("a/x"), rel("a/y")],
+            "p".into(),
+        );
+        assert_eq!(row_name(&branching, branching.index[&rel("a")]), "a");
+
+        // A single *file* child does not concatenate either.
+        let file_only = build_skeleton(&[(rel("src/main.rs"), 1)], &[rel("src")], "p".into());
+        assert_eq!(row_name(&file_only, file_only.index[&rel("src")]), "src");
+    }
+
+    #[test]
+    fn filter_reveals_a_chained_row_by_inner_segment() {
+        // Match on `b`, an inner segment of the `a/b/c` chain, reveals the row
+        // and (since the segment matched) its subtree.
+        let names = filtered_names(&chained(), "b");
+        assert_eq!(names, ["a", "deep.rs"]);
     }
 
     fn filtered_names(tree: &Tree, query: &str) -> Vec<String> {

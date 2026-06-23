@@ -206,6 +206,33 @@ mod tests {
     }
 
     #[test]
+    fn renders_a_sole_subdir_chain_as_one_concatenated_row() {
+        // `src/main/java` is a chain of sole sub-directories: it must render as a
+        // single concatenated row, never as separate `main` / `java` rows.
+        let files = vec![(PathBuf::from("src/main/java/App.java"), 100)];
+        let dirs = vec![
+            PathBuf::from("src"),
+            PathBuf::from("src/main"),
+            PathBuf::from("src/main/java"),
+        ];
+        let tree = build_skeleton(&files, &dirs, "proj".into());
+        let mut app = App::new(PathBuf::from("/proj"), "proj".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(
+            view.contains("src/main/java"),
+            "chain not concatenated:\n{view}"
+        );
+    }
+
+    #[test]
     fn renders_size_lens_with_human_bytes() {
         let mut app = sample_app();
         app.update(crate::action::Action::JumpLens(2)); // size lens

@@ -37,7 +37,7 @@ pub fn render(frame: &mut Frame, loaded: &Loaded, area: Rect) {
             .map_or(theme::ACCENT, theme::language_color),
     };
     lines.push(Line::from(Span::styled(
-        node.name.clone(),
+        loaded.display_name(id),
         Style::default()
             .fg(title_color)
             .add_modifier(Modifier::BOLD),

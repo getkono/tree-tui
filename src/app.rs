@@ -337,6 +337,18 @@ impl Loaded {
         self.value(self.active_lens.primary().key, id)
     }
 
+    /// The concatenated display name for a row (a chain of sole sub-directories,
+    /// e.g. `src/main/java`); just the node's own name otherwise.
+    pub fn display_name(&self, id: NodeId) -> String {
+        model::view::row_name(&self.tree, id)
+    }
+
+    /// A row's indentation level, counted in displayed ancestors so a chained
+    /// child sits one level under its concatenated row.
+    pub fn display_depth(&self, id: NodeId) -> usize {
+        model::view::display_depth(&self.tree, id)
+    }
+
     /// The code layer entry for a node, if the code layer is computed.
     pub fn code_at(&self, id: NodeId) -> Option<&CodeData> {
         self.code.ready().map(|values| &values[id])
@@ -503,10 +515,14 @@ impl Loaded {
         if !self.tree.nodes[id].expanded {
             self.tree.nodes[id].expanded = true;
             self.rebuild();
-        } else if let Some(&first) = self.tree.nodes[id].children.first()
-            && let Some(pos) = self.visible.iter().position(|&n| n == first)
-        {
-            self.table_state.select(Some(pos));
+        } else {
+            // Descend into the chain's tail children, not the head's.
+            let tail = model::view::segment_tail(&self.tree, id);
+            if let Some(&first) = self.tree.nodes[tail].children.first()
+                && let Some(pos) = self.visible.iter().position(|&n| n == first)
+            {
+                self.table_state.select(Some(pos));
+            }
         }
     }
 
@@ -517,11 +533,15 @@ impl Loaded {
         if self.tree.nodes[id].is_dir() && self.tree.nodes[id].expanded {
             self.tree.nodes[id].expanded = false;
             self.rebuild();
-        } else if let Some(parent) = self.tree.nodes[id].parent
-            && parent != self.tree.root
-            && let Some(pos) = self.visible.iter().position(|&n| n == parent)
-        {
-            self.table_state.select(Some(pos));
+        } else if let Some(parent) = self.tree.nodes[id].parent {
+            // Jump to the row that owns the parent — the head of its chain, which
+            // may be several path segments up from the raw parent node.
+            let target = model::view::segment_head(&self.tree, parent);
+            if target != self.tree.root
+                && let Some(pos) = self.visible.iter().position(|&n| n == target)
+            {
+                self.table_state.select(Some(pos));
+            }
         }
     }
 
@@ -580,6 +600,29 @@ mod tests {
             repo: false,
         });
         // Simulate the event loop draining the initial code request.
+        app.pending_compute = None;
+        app
+    }
+
+    /// A loaded app whose tree contains the sole-subdirectory chain
+    /// `a/b/c/deep.rs` plus a top-level `top.rs`.
+    fn chained_app() -> App {
+        let files = vec![
+            (PathBuf::from("a/b/c/deep.rs"), 1000),
+            (PathBuf::from("top.rs"), 10),
+        ];
+        let dirs = vec![
+            PathBuf::from("a"),
+            PathBuf::from("a/b"),
+            PathBuf::from("a/b/c"),
+        ];
+        let tree = build_skeleton(&files, &dirs, "proj".into());
+        let mut app = App::new(PathBuf::from("/proj"), "proj".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+        });
         app.pending_compute = None;
         app
     }
@@ -704,6 +747,50 @@ mod tests {
         // src (100 lines) sorts above README.md (0) under the code lens.
         let src_id = loaded.tree.index[&PathBuf::from("src")];
         assert_eq!(loaded.value(SubKey::Lines, src_id), 100);
+    }
+
+    #[test]
+    fn chained_segment_expands_and_collapses_as_one_unit() {
+        let mut app = chained_app();
+        // `a/b/c` is a single row: b and c never appear on their own.
+        assert!(is_visible(&app, "a"));
+        assert!(!is_visible(&app, "b"));
+        assert!(!is_visible(&app, "c"));
+        assert!(!is_visible(&app, "deep.rs"));
+
+        // The row reads as the concatenated path.
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        let a = loaded.tree.index[&PathBuf::from("a")];
+        assert_eq!(loaded.display_name(a), "a/b/c");
+
+        // Expanding the chain reveals the tail's child directly — no b/c rows.
+        select(&mut app, "a");
+        app.update(Action::Expand);
+        assert!(is_visible(&app, "deep.rs"));
+        assert!(!is_visible(&app, "b"));
+        assert!(!is_visible(&app, "c"));
+
+        // Collapsing the same row hides it again.
+        select(&mut app, "a");
+        app.update(Action::Collapse);
+        assert!(!is_visible(&app, "deep.rs"));
+    }
+
+    #[test]
+    fn collapse_from_chained_child_jumps_to_the_segment_row() {
+        let mut app = chained_app();
+        select(&mut app, "a");
+        app.update(Action::Expand);
+        select(&mut app, "deep.rs");
+        // Left on a file jumps to the parent *row* — the `a/b/c` chain head.
+        app.update(Action::Collapse);
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        let selected = loaded.selected_id().unwrap();
+        assert_eq!(loaded.tree.nodes[selected].name, "a");
     }
 
     #[test]
