@@ -20,6 +20,7 @@ mod scan;
 mod tui;
 mod ui;
 mod version;
+mod watch;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

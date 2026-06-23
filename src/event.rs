@@ -5,11 +5,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::app::{App, OpenMode, Screen};
 use crate::collect::{self, LayerResult};
-use crate::{editor, pager, scan, tui, ui};
+use crate::scan::ScanOutcome;
+use crate::{editor, pager, scan, tui, ui, watch};
 
 /// Drive the app until the user quits or input is exhausted.
 ///
@@ -23,6 +24,11 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
     // Background lens computations report their results over this channel. The
     // original sender lives for the whole loop, so the receiver never closes.
     let (lens_tx, mut lens_rx) = mpsc::unbounded_channel::<LayerResult>();
+    // Filesystem watch (best-effort): a coalesced signal triggers a re-walk.
+    // The binding keeps the debouncer alive for the loop's lifetime.
+    let mut fs_watch = watch::spawn(&app.root);
+    let mut rescan_rx: Option<oneshot::Receiver<ScanOutcome>> = None;
+    let mut rescan_again = false;
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
 
@@ -56,6 +62,28 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
             },
             Some(result) = lens_rx.recv() => {
                 app.on_layer(result);
+                redraw = true;
+            },
+            // A debounced filesystem change: kick off a re-walk, coalescing with
+            // any already in flight (no redraw — nothing visible changes yet).
+            Some(()) = async { fs_watch.as_mut().unwrap().rx.recv().await }, if fs_watch.is_some() => {
+                if rescan_rx.is_none() {
+                    rescan_rx = Some(scan::spawn(app.root.clone(), app.root_label.clone()));
+                } else {
+                    rescan_again = true;
+                }
+            },
+            // A re-walk finished: merge it (a no-op when nothing visible changed),
+            // then start another if a change landed while it was running.
+            outcome = async { rescan_rx.as_mut().unwrap().await }, if rescan_rx.is_some() => {
+                rescan_rx = None;
+                if let Ok(outcome) = outcome {
+                    app.on_rescan(outcome);
+                }
+                if rescan_again {
+                    rescan_again = false;
+                    rescan_rx = Some(scan::spawn(app.root.clone(), app.root_label.clone()));
+                }
                 redraw = true;
             },
             _ = ticker.tick(), if app.is_busy() => {
