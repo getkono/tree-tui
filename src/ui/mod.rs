@@ -5,6 +5,8 @@ mod footer;
 mod header;
 mod help;
 mod loading;
+pub mod preview;
+mod syntax;
 pub mod theme;
 mod tree_view;
 
@@ -15,6 +17,15 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::app::{App, Mode, Screen};
+
+/// Minimum body width/height before the preview pane is shown; below either, it
+/// folds away so the tree keeps the room.
+const PREVIEW_MIN_WIDTH: u16 = 100;
+const PREVIEW_MIN_HEIGHT: u16 = 20;
+/// Share of the body width the preview pane takes when shown.
+const PREVIEW_PCT: u16 = 40;
+/// Fixed width of the detail panel when shown.
+const DETAIL_WIDTH: u16 = 36;
 
 /// Render the current frame for `app`.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -33,9 +44,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Copy scalar/owned view state out before borrowing `screen` mutably.
+    // Copy/borrow scalar state out before borrowing `screen` mutably.
+    let root = app.root.clone();
     let root_label = app.root_label.clone();
     let editing = app.mode == Mode::Filter;
+    let picker = app.picker.as_ref();
     let Screen::Loaded(loaded) = &mut app.screen else {
         return;
     };
@@ -50,20 +63,39 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
 
     header::render(frame, &root_label, loaded, header_area);
 
-    // The detail panel, when shown, takes a fixed column on the right.
-    let tree_area = if loaded.show_detail {
-        let [left, right] =
-            Layout::horizontal([Constraint::Min(0), Constraint::Length(36)]).areas(body_area);
-        detail::render(frame, loaded, right);
-        left
-    } else {
-        body_area
-    };
+    // Right-side panes appear as room allows: the detail panel takes a fixed
+    // column; the preview pane takes a share of the width, folding away on a
+    // narrow or short terminal.
+    let show_preview = loaded.show_preview
+        && body_area.width >= PREVIEW_MIN_WIDTH
+        && body_area.height >= PREVIEW_MIN_HEIGHT;
+
+    let mut constraints = vec![Constraint::Min(0)];
+    if loaded.show_detail {
+        constraints.push(Constraint::Length(DETAIL_WIDTH));
+    }
+    if show_preview {
+        constraints.push(Constraint::Percentage(PREVIEW_PCT));
+    }
+    let chunks = Layout::horizontal(constraints).split(body_area);
+
+    let tree_area = chunks[0];
+    let mut next = 1;
+    if loaded.show_detail {
+        detail::render(frame, loaded, chunks[next]);
+        next += 1;
+    }
+    let preview_area = show_preview.then(|| chunks[next]);
 
     if loaded.visible.is_empty() {
         render_empty(frame, &loaded.filter, tree_area);
     } else {
         tree_view::render(frame, loaded, tree_area);
+    }
+
+    if let Some(preview_area) = preview_area {
+        loaded.ensure_preview(&root, picker);
+        preview::render(frame, loaded, preview_area);
     }
 
     let computing = loaded.active_computing().then_some(loaded.active_lens);
@@ -244,6 +276,35 @@ mod tests {
         let view = format!("{}", terminal.backend());
         assert!(view.contains("size")); // size lens primary column
         assert!(view.contains("KB")); // human-readable bytes
+    }
+
+    #[test]
+    fn preview_pane_shows_when_wide_and_folds_when_narrow() {
+        let mut app = sample_app();
+
+        // Wide and tall: the preview pane is shown (the selected dir renders a
+        // short note, but the bordered " preview " title is present).
+        let mut wide = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        wide.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", wide.backend());
+        assert!(
+            view.contains("preview"),
+            "preview missing when wide:\n{view}"
+        );
+
+        // Narrow: it folds away so the tree keeps the room.
+        let mut narrow = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        narrow.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", narrow.backend());
+        assert!(!view.contains("preview"), "preview should fold:\n{view}");
+
+        // Toggled off: no pane even on a wide terminal.
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.show_preview = false;
+        }
+        wide.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", wide.backend());
+        assert!(!view.contains("preview"), "preview should be off:\n{view}");
     }
 
     #[test]

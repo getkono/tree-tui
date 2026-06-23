@@ -74,6 +74,10 @@ async fn run(dir: PathBuf) -> color_eyre::Result<()> {
     tracing::info!(target = %root.display(), "tree starting");
 
     let mut app = App::new(root, label);
+    // Probe the terminal's image capabilities for the preview pane before we
+    // take over the screen. Best-effort: on a non-tty or unsupported terminal
+    // this is `None` and image previews fall back to a placeholder.
+    app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
     let mut terminal = tui::init()?;
     let result = event::run(&mut terminal, &mut app).await;
     tui::restore();
