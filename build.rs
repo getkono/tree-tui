@@ -12,8 +12,15 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-env-changed=TREE_BUILD_SHA");
 
-    let sha = git(&["rev-parse", "--short=9", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+    // A CI-provided commit hash takes precedence over the local `git` probe: the
+    // cross container that builds the Linux release binaries has no `git`, so the
+    // release workflow exports `TREE_BUILD_SHA` (where git *is* available) and
+    // forwards it into the container via Cross.toml.
+    let sha = env_override("TREE_BUILD_SHA")
+        .or_else(|| git(&["rev-parse", "--short=9", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
     let dirty = match git(&["status", "--porcelain"]) {
         Some(out) => !out.is_empty(),
         None => false,
@@ -38,6 +45,14 @@ fn main() {
 
 fn emit(key: &str, val: &str) {
     println!("cargo:rustc-env={key}={val}");
+}
+
+/// A trimmed, non-empty environment variable, or `None` if unset or blank.
+fn env_override(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Run a git subcommand, returning trimmed stdout on success.

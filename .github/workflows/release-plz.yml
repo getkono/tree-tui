@@ -20,6 +20,10 @@ jobs:
       contents: write # push tags, create the GitHub Release
       id-token: write # crates.io Trusted Publishing (OIDC) — no long-lived token in CI
       pull-requests: read
+    # Surfaced to the binary/Homebrew jobs below so they only run when a release
+    # was actually cut (not on every push to master).
+    outputs:
+      releases_created: ${{ steps.release-plz.outputs.releases_created }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -29,6 +33,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Run release-plz
+        id: release-plz
         uses: release-plz/action@v0.5
         with:
           command: release
@@ -66,3 +71,170 @@ jobs:
           # A PAT (not the built-in GITHUB_TOKEN) is required for CI to run on the release PR,
           # so branch protection can gate it. Falls back until the PAT secret is added.
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN || secrets.GITHUB_TOKEN }}
+
+  # ── Prebuilt binaries + Homebrew tap ──────────────────────────────────────
+  # These run only when the release job above actually cut a release. release-plz
+  # has already created the GitHub Release, the `v{version}` tag, and published to
+  # crates.io; the jobs below just attach prebuilt binaries to that Release and
+  # refresh the formula in getkono/homebrew-tap.
+
+  # Cross-compile the release binary for each published target.
+  build:
+    name: Build ${{ matrix.target }}
+    needs: release-plz-release
+    if: ${{ needs.release-plz-release.outputs.releases_created == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, use_cross: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, use_cross: true }
+          - { os: macos-latest, target: x86_64-apple-darwin, use_cross: false }
+          - { os: macos-latest, target: aarch64-apple-darwin, use_cross: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, use_cross: false }
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross
+        if: matrix.use_cross
+        uses: taiki-e/install-action@cross
+      - name: Build
+        shell: bash
+        run: |
+          # The cross container has no git, so export the commit hash here (where
+          # git is available) and forward it via Cross.toml; build.rs prefers this
+          # over its local probe, keeping the Linux binaries' `-V` report accurate.
+          export TREE_BUILD_SHA="$(git rev-parse --short=9 HEAD)"
+          if [[ "${{ matrix.use_cross }}" == "true" ]]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../tree-tui-${{ matrix.target }}.tar.gz tree
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path tree.exe -DestinationPath ../../../tree-tui-${{ matrix.target }}.zip
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tree-tui-${{ matrix.target }}
+          path: tree-tui-${{ matrix.target }}.*
+
+  # Attach the built binaries to the GitHub Release that release-plz created.
+  upload-assets:
+    name: Upload release binaries
+    needs: [release-plz-release, build]
+    if: ${{ needs.release-plz-release.outputs.releases_created == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload assets to the existing Release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Upload binaries to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The merged release PR bumped Cargo.toml, so its version is the one just
+          # released; release-plz tagged it `v{version}`. Read the first top-level
+          # `version =` (the [package] version) — no toolchain needed on this runner.
+          VERSION="$(grep -m1 '^version *=' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+          gh release upload "v${VERSION}" tree-tui-*.tar.gz tree-tui-*.zip --clobber
+
+  # Render the Homebrew formula from the release SHA-256s and push it to the tap.
+  update-tap:
+    name: Update Homebrew tap
+    needs: [release-plz-release, build]
+    # Canonical repo only; forks lack the secret. Together with the token check
+    # below, this keeps the job a clean no-op until the maintainer adds the
+    # secret, so releases never fail on account of it.
+    if: ${{ needs.release-plz-release.outputs.releases_created == 'true' && github.repository == 'getkono/tree-tui' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Render formula
+        id: render
+        shell: bash
+        env:
+          HAVE_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$HAVE_TOKEN" != "true" ]]; then
+            echo "HOMEBREW_TAP_TOKEN not set — skipping Homebrew tap update."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERSION="$(grep -m1 '^version *=' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+
+          # SHA-256 of each release tarball, computed from the local build
+          # artifacts (correct regardless of CDN propagation). set -e aborts if
+          # any tarball is missing, so an empty hash can't slip into the formula.
+          sha() { sha256sum "tree-tui-$1.tar.gz" | cut -d' ' -f1; }
+          mkdir -p rendered
+          sed \
+            -e "s/__VERSION__/${VERSION}/g" \
+            -e "s/__SHA256_X86_64_UNKNOWN_LINUX_MUSL__/$(sha x86_64-unknown-linux-musl)/g" \
+            -e "s/__SHA256_AARCH64_UNKNOWN_LINUX_MUSL__/$(sha aarch64-unknown-linux-musl)/g" \
+            -e "s/__SHA256_X86_64_APPLE_DARWIN__/$(sha x86_64-apple-darwin)/g" \
+            -e "s/__SHA256_AARCH64_APPLE_DARWIN__/$(sha aarch64-apple-darwin)/g" \
+            .github/homebrew/tree-tui.rb > rendered/tree-tui.rb
+
+          # Fail loudly if any placeholder survived (e.g. an artifact was renamed
+          # in the build job) rather than pushing a broken formula to the tap.
+          if grep -q "__" rendered/tree-tui.rb; then
+            echo "::error::Unsubstituted placeholder remains in the rendered formula"
+            grep -n "__" rendered/tree-tui.rb
+            exit 1
+          fi
+
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Check out the Homebrew tap
+        if: steps.render.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: getkono/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Commit and push the updated formula
+        if: steps.render.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Formula
+          cp rendered/tree-tui.rb tap/Formula/tree-tui.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tree-tui.rb
+          if git diff --cached --quiet; then
+            echo "Formula already up to date — nothing to commit."
+            exit 0
+          fi
+          git commit -m "tree-tui ${{ steps.render.outputs.version }}"
+          git push
