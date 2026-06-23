@@ -46,13 +46,22 @@ is instant, and you never pay for git history unless you ask for it.
 
 ## Install
 
+Homebrew (macOS and Linux):
+
+```bash
+brew install getkono/tap/tree-tui   # installs the `tree` binary
+```
+
+From source (with [mise](https://mise.jdx.dev)):
+
 ```bash
 mise run install   # cargo install --path . --force  →  installs the `tree` binary
 ```
 
 > **Note:** the binary is named `tree`, so once installed it shadows the classic `tree` command on
 > your `PATH`. That's intentional (`tree [dir]` is the spec); rename the binary in `Cargo.toml`
-> (`[[bin]]`) if you'd rather keep both.
+> (`[[bin]]`) if you'd rather keep both. The Homebrew formula declares `conflicts_with "tree"` for
+> the same reason.
 
 ## Usage
 
