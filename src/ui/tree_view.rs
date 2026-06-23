@@ -108,7 +108,14 @@ impl Columns {
     fn row(&self, loaded: &Loaded, id: NodeId) -> Row<'static> {
         let node = &loaded.tree.nodes[id];
         let primary_lang = loaded.code_at(id).and_then(|c| c.primary_lang);
-        let mut cells = vec![Cell::from(Line::from(name_spans(node, primary_lang)))];
+        let name = loaded.display_name(id);
+        let indent = loaded.display_depth(id);
+        let mut cells = vec![Cell::from(Line::from(name_spans(
+            node,
+            &name,
+            indent,
+            primary_lang,
+        )))];
 
         if self.lang_width > 0 {
             let empty = BTreeMap::new();
@@ -152,7 +159,9 @@ pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
     for &id in &loaded.visible {
         let node = &loaded.tree.nodes[id];
         let primary_lang = loaded.code_at(id).and_then(|c| c.primary_lang);
-        name_needed = name_needed.max(spans_width(&name_spans(node, primary_lang)));
+        let name = loaded.display_name(id);
+        let indent = loaded.display_depth(id);
+        name_needed = name_needed.max(spans_width(&name_spans(node, &name, indent, primary_lang)));
         if matches!(lens, Lens::Code)
             && let Some(code) = loaded.code_at(id)
         {
@@ -210,8 +219,14 @@ fn num_cell(
     Cell::from(Line::from(Span::styled(text, style)).alignment(Alignment::Right))
 }
 
-fn name_spans(node: &TreeNode, primary_lang: Option<LanguageType>) -> Vec<Span<'static>> {
-    let indent = node.depth.saturating_sub(1);
+/// Render a row's name column: indentation, glyph, then `name` (the concatenated
+/// chain for a directory row, the file name otherwise).
+fn name_spans(
+    node: &TreeNode,
+    name: &str,
+    indent: usize,
+    primary_lang: Option<LanguageType>,
+) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw("  ".repeat(indent))];
     match node.kind {
         NodeKind::Dir => {
@@ -225,7 +240,7 @@ fn name_spans(node: &TreeNode, primary_lang: Option<LanguageType>) -> Vec<Span<'
                 Style::default().fg(theme::DIR),
             ));
             spans.push(Span::styled(
-                format!("{}/", node.name),
+                format!("{name}/"),
                 Style::default().fg(theme::DIR).add_modifier(Modifier::BOLD),
             ));
         }
@@ -235,7 +250,7 @@ fn name_spans(node: &TreeNode, primary_lang: Option<LanguageType>) -> Vec<Span<'
                 format!("{} ", theme::GLYPH_FILE),
                 Style::default().fg(color),
             ));
-            spans.push(Span::raw(node.name.clone()));
+            spans.push(Span::raw(name.to_string()));
         }
     }
     spans
