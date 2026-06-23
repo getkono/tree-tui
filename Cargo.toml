@@ -30,7 +30,7 @@ futures = "0.3"
 ignore = "0.4"
 # Pure-Rust git (no external binary, no C toolchain) for the churn/status lenses.
 # Keep gix's defaults (they pull in the hash backend) and add what the lenses need.
-gix = { version = "0.84", features = ["revision", "blob-diff", "status", "dirwalk"] }
+gix = { version = "0.85", features = ["revision", "blob-diff", "status", "dirwalk"] }
 # Image decoding for the preview pane (the same crate, and version, ratatui-image uses).
 image = "0.25"
 ratatui = "0.30.1"
