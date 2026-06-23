@@ -6,19 +6,19 @@
 //! a pure function makes it unit-testable without driving a real terminal: the
 //! impure draining stays in the loop, the rules live here.
 
-use crossterm::event::{Event, KeyEvent, KeyEventKind, MouseEvent, MouseEventKind};
+use crossterm::event::{Event, KeyEvent, KeyEventKind, MouseButton, MouseEvent, MouseEventKind};
 
-/// A single unit of work the event loop applies after coalescing. The mouse
-/// variants are produced here but only acted on once mouse capture is enabled
-/// (see issue #23); until then the loop treats them as no-ops.
+/// A single unit of work the event loop applies after coalescing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    /// A key press (release/repeat kinds are dropped during coalescing).
+    /// A key press or repeat (release kinds are dropped during coalescing).
     Key(KeyEvent),
     /// Net wheel scroll at a screen position: positive = down, negative = up.
+    /// The handler maps this to a small fixed step — magnitude is direction
+    /// only, never the raw event count (terminals emit several per notch).
     Scroll { col: u16, row: u16, delta: i32 },
-    /// The final cursor position after a run of moves (focus-follows-mouse).
-    MouseMoved { col: u16, row: u16 },
+    /// A left click at a screen position (interact-to-focus).
+    Click { col: u16, row: u16 },
     /// A redraw-worthy resize.
     Resize,
 }
@@ -30,20 +30,24 @@ pub const MAX_BATCH: usize = 256;
 /// Collapse a drained burst of raw events into the minimal set of effects.
 ///
 /// Rules:
-/// - Key **presses** are preserved individually and in order — each can have a
-///   distinct, non-idempotent effect (expand, open, lens jump), so they must
-///   not be merged. Release/repeat kinds are dropped.
+/// - Key **presses and repeats** are preserved individually and in order — each
+///   can have a distinct, non-idempotent effect (expand, open, lens jump), so
+///   they must not be merged. Repeats drive held-key navigation; only release
+///   kinds are dropped.
 /// - Consecutive wheel events at the same spot and direction sum into one
 ///   [`Effect::Scroll`]; a direction flip or a different position flushes the
-///   run.
-/// - A run of `Moved` events keeps only the latest position.
+///   run. (The handler uses only the sign — see [`Effect::Scroll`].)
+/// - A left click becomes one [`Effect::Click`]; other mouse events (motion,
+///   drags, other buttons) are dropped.
 /// - Resizes collapse to a single [`Effect::Resize`].
 pub fn coalesce(events: impl IntoIterator<Item = Event>) -> Vec<Effect> {
     let mut out: Vec<Effect> = Vec::new();
     for ev in events {
         match ev {
-            Event::Key(key) if key.kind == KeyEventKind::Press => out.push(Effect::Key(key)),
-            // Release/Repeat kinds carry no action of their own.
+            Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                out.push(Effect::Key(key))
+            }
+            // Release kinds carry no action of their own.
             Event::Key(_) => {}
             Event::Resize(_, _) => {
                 if !matches!(out.last(), Some(Effect::Resize)) {
@@ -59,23 +63,18 @@ pub fn coalesce(events: impl IntoIterator<Item = Event>) -> Vec<Effect> {
 }
 
 /// Fold a single mouse event into the running effect list, merging adjacent
-/// same-position wheel runs and collapsing move runs to the latest position.
+/// same-position wheel runs. A left click becomes a [`Effect::Click`]; motion,
+/// drags, and other buttons are ignored (interact-to-focus has no use for
+/// bare hover).
 fn merge_mouse(out: &mut Vec<Effect>, m: MouseEvent) {
     let step: i32 = match m.kind {
         MouseEventKind::ScrollDown => 1,
         MouseEventKind::ScrollUp => -1,
-        // Moves coalesce to the latest position; everything else is unused by
-        // the wheel-scroll / focus-follows-mouse model.
-        MouseEventKind::Moved => {
-            if let Some(Effect::MouseMoved { col, row }) = out.last_mut() {
-                *col = m.column;
-                *row = m.row;
-            } else {
-                out.push(Effect::MouseMoved {
-                    col: m.column,
-                    row: m.row,
-                });
-            }
+        MouseEventKind::Down(MouseButton::Left) => {
+            out.push(Effect::Click {
+                col: m.column,
+                row: m.row,
+            });
             return;
         }
         _ => return,
@@ -181,9 +180,15 @@ mod tests {
     }
 
     #[test]
-    fn moves_keep_only_the_latest_position() {
+    fn motion_events_are_ignored() {
         let burst = (0..5).map(|i| mouse(MouseEventKind::Moved, i, i));
-        assert_eq!(coalesce(burst), vec![Effect::MouseMoved { col: 4, row: 4 }]);
+        assert!(coalesce(burst).is_empty());
+    }
+
+    #[test]
+    fn left_click_becomes_one_click_effect() {
+        let burst = vec![mouse(MouseEventKind::Down(MouseButton::Left), 7, 3)];
+        assert_eq!(coalesce(burst), vec![Effect::Click { col: 7, row: 3 }]);
     }
 
     #[test]
@@ -204,12 +209,20 @@ mod tests {
     }
 
     #[test]
-    fn key_release_kinds_are_dropped() {
+    fn release_is_dropped_but_repeat_is_kept() {
         let burst = vec![
-            key_kind(KeyCode::Char('j'), KeyEventKind::Release),
             key_kind(KeyCode::Char('j'), KeyEventKind::Repeat),
+            key_kind(KeyCode::Char('j'), KeyEventKind::Release),
         ];
-        assert!(coalesce(burst).is_empty());
+        // The repeat drives held-key navigation; only the release is dropped.
+        assert_eq!(
+            coalesce(burst),
+            vec![Effect::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('j'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            ))]
+        );
     }
 
     #[test]
@@ -244,11 +257,11 @@ mod tests {
     }
 
     #[test]
-    fn drag_and_button_events_are_ignored() {
+    fn drag_release_and_non_left_buttons_are_ignored() {
         let burst = vec![
-            mouse(MouseEventKind::Down(MouseButton::Left), 1, 1),
             mouse(MouseEventKind::Drag(MouseButton::Left), 2, 2),
             mouse(MouseEventKind::Up(MouseButton::Left), 3, 3),
+            mouse(MouseEventKind::Down(MouseButton::Right), 4, 4),
         ];
         assert!(coalesce(burst).is_empty());
     }

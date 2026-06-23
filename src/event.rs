@@ -14,6 +14,11 @@ use crate::scan::ScanOutcome;
 use crate::ui::reader::Handoff;
 use crate::{editor, pager, scan, tui, ui, watch};
 
+/// How long the selection must rest before the preview's (synchronous) file
+/// read + syntax highlight runs. A held key / wheel spin keeps moving the
+/// selection and so keeps pushing this out, keeping highlight off nav frames.
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(80);
+
 /// Drive the app until the user quits or input is exhausted.
 ///
 /// Redraws happen only on change: a state-changing key, a resize, walk
@@ -33,6 +38,10 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
     let mut rescan_again = false;
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
+    // Debounced preview refresh: the node the preview should show once the
+    // selection settles, and the deadline at which to load it.
+    let mut preview_target = app.preview_target_id();
+    let mut preview_deadline: Option<tokio::time::Instant> = None;
 
     terminal.draw(|frame| ui::render(frame, app))?;
 
@@ -42,8 +51,9 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
             maybe_event = events.next() => {
                 // Handle the first event, then drain everything else that is
                 // immediately ready into one burst. Coalescing collapses wheel
-                // and move runs so a flood becomes a single net change and a
-                // single redraw (issue #22).
+                // runs so a flood becomes a single net change and a single
+                // redraw (issue #22), and drops bare motion entirely — so idly
+                // moving the mouse produces no effects and no redraw.
                 let first = match maybe_event {
                     Some(Ok(ev)) => ev,
                     Some(Err(err)) => return Err(err.into()),
@@ -65,13 +75,16 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
                         None => break,
                     }
                 }
-                for effect in batch::coalesce(burst) {
+                let effects = batch::coalesce(burst);
+                // Only repaint when the burst carried real work; a burst of
+                // nothing but dropped motion/release events changes nothing.
+                redraw = !effects.is_empty();
+                for effect in effects {
                     apply_effect(terminal, app, effect)?;
                     if app.should_quit {
                         break;
                     }
                 }
-                redraw = true;
             },
             result = &mut scan_rx, if matches!(app.screen, Screen::Loading) => {
                 match result {
@@ -111,6 +124,24 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
                 app.elapsed = started.elapsed();
                 redraw = true;
             },
+            // The selection has rested long enough: load the preview now (the
+            // synchronous read + highlight happens here, off the nav frames).
+            _ = async { tokio::time::sleep_until(preview_deadline.unwrap()).await },
+                if preview_deadline.is_some() =>
+            {
+                preview_deadline = None;
+                app.refresh_preview();
+                redraw = true;
+            },
+        }
+
+        // (Re)arm the preview debounce when the selection moves to a new,
+        // not-yet-cached node; while navigating it keeps getting pushed out, so
+        // the highlight runs only once the selection settles (~one debounce).
+        let target = app.preview_target_id();
+        if target != preview_target {
+            preview_target = target;
+            preview_deadline = target.map(|_| tokio::time::Instant::now() + PREVIEW_DEBOUNCE);
         }
 
         // Drain a requested lens computation onto a blocking thread.
@@ -147,7 +178,7 @@ fn apply_effect(
             drain_pending_capture(app);
         }
         Effect::Scroll { col, row, delta } => app.handle_scroll(col, row, delta),
-        Effect::MouseMoved { col, row } => app.handle_mouse_moved(col, row),
+        Effect::Click { col, row } => app.handle_click(col, row),
         // The resize itself needs nothing; the caller's redraw repaints.
         Effect::Resize => {}
     }

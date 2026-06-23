@@ -49,10 +49,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     // Copy/borrow scalar state out before borrowing `screen` mutably.
-    let root = app.root.clone();
     let root_label = app.root_label.clone();
     let editing = app.mode == Mode::Filter;
-    let picker = app.picker.as_ref();
     let Screen::Loaded(loaded) = &mut app.screen else {
         return;
     };
@@ -108,7 +106,9 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if let Some(preview_area) = preview_area {
-        loaded.ensure_preview(&root, picker);
+        // The preview content is loaded off the render path — debounced by the
+        // event loop so a held key / wheel spin never pays a file read + syntax
+        // highlight per frame (that synchronous cost is what made nav lurch).
         preview::render(frame, loaded, preview_area);
     }
 

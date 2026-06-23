@@ -6,8 +6,8 @@
 //! prints its report to a clean screen. Every successful [`init`] must be
 //! paired with a [`restore`] on the way out.
 //!
-//! Mouse capture is enabled so the UI can wheel-scroll panes and follow the
-//! cursor for focus. The tradeoff: while capture is on, the terminal's native
+//! Mouse capture is enabled so the UI can wheel-scroll panes and focus the pane
+//! you scroll or click. The tradeoff: while capture is on, the terminal's native
 //! click-drag text selection is intercepted — use the in-app yank (OSC 52) or
 //! the release-capture toggle ([`set_mouse_capture`]) to copy with the mouse.
 
@@ -27,7 +27,7 @@ static MOUSE_CAPTURED: AtomicBool = AtomicBool::new(false);
 ///
 /// Also asks the terminal — when it supports the kitty keyboard protocol — to
 /// disambiguate key events, so `Shift+Enter` arrives distinct from `Enter`, and
-/// enables mouse capture for wheel scrolling and focus-follows-mouse.
+/// enables mouse capture for wheel scrolling and click-to-focus.
 pub fn init() -> std::io::Result<DefaultTerminal> {
     let terminal = ratatui::try_init()?;
     push_keyboard_enhancement();

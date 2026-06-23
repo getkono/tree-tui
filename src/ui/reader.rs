@@ -178,7 +178,9 @@ impl Reader {
         }
     }
 
-    fn scroll(&mut self, delta: i32) {
+    /// Scroll the view by `delta` lines. `pub(crate)` so the event loop can
+    /// route mouse-wheel scrolls here, the same as in the tree/preview.
+    pub(crate) fn scroll(&mut self, delta: i32) {
         if let Some(cv) = self.code_view_mut() {
             cv.scroll_by(delta);
         }

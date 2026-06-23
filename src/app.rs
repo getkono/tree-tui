@@ -19,6 +19,11 @@ use crate::ui::codeview::CodeView;
 use crate::ui::preview::Preview;
 use crate::ui::reader::{Handoff, Reader, ReaderExit};
 
+/// Rows the tree selection moves per wheel notch.
+const WHEEL_TREE_ROWS: i64 = 1;
+/// Lines a scrollable view (preview / reader) moves per wheel notch.
+const WHEEL_PREVIEW_LINES: i32 = 3;
+
 /// Which pane receives Normal-mode navigation keys and is drawn focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Focus {
@@ -305,8 +310,42 @@ impl App {
     }
 
     fn toggle_preview(&mut self) {
+        let root = self.root.clone();
+        let picker = self.picker.as_ref();
         if let Screen::Loaded(loaded) = &mut self.screen {
             loaded.show_preview = !loaded.show_preview;
+            // Paint the first preview immediately on enable; later selection
+            // changes are debounced off the navigation hot path (event loop).
+            if loaded.show_preview {
+                loaded.ensure_preview(&root, picker);
+            }
+        }
+    }
+
+    /// The selected node whose preview is on screen but not yet cached — the
+    /// target the event loop debounces a refresh toward. `None` when the preview
+    /// is hidden, folded away, or already current; used to keep the syntax
+    /// highlight off the per-frame navigation path.
+    pub fn preview_target_id(&self) -> Option<NodeId> {
+        let Screen::Loaded(loaded) = &self.screen else {
+            return None;
+        };
+        if loaded.show_preview && loaded.panes.preview.is_some() {
+            let sel = loaded.selected_id();
+            if sel != loaded.preview_for {
+                return sel;
+            }
+        }
+        None
+    }
+
+    /// Load the preview for the current selection. Driven by the event loop's
+    /// debounce timer so the file read + highlight never runs on a nav frame.
+    pub fn refresh_preview(&mut self) {
+        let root = self.root.clone();
+        let picker = self.picker.as_ref();
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.ensure_preview(&root, picker);
         }
     }
 
@@ -345,22 +384,34 @@ impl App {
         self.pending_capture = Some(!crate::tui::mouse_captured());
     }
 
-    /// A wheel scroll at a screen position: scroll whichever pane is under the
-    /// cursor, independent of which pane holds keyboard focus.
+    /// A wheel scroll at a screen position. The wheel acts on the pane under the
+    /// cursor and focuses it (interact-to-focus). The step is a small fixed
+    /// amount per notch: `delta` carries only direction, because terminals emit
+    /// several wheel events per physical notch (and a fast spin lands in one
+    /// coalesced burst), so its magnitude is not a reliable distance.
     pub fn handle_scroll(&mut self, col: u16, row: u16, delta: i32) {
-        let Screen::Loaded(loaded) = &mut self.screen else {
-            return;
-        };
-        match loaded.panes.hit(col, row) {
-            Some(Focus::Preview) => loaded.preview_view.scroll_by(delta),
-            Some(Focus::Tree) => loaded.move_by(delta as i64),
-            None => {}
+        let dir = delta.signum();
+        match &mut self.screen {
+            Screen::Loaded(loaded) => match loaded.panes.hit(col, row) {
+                Some(Focus::Preview) => {
+                    loaded.focus = Focus::Preview;
+                    loaded.preview_view.scroll_by(dir * WHEEL_PREVIEW_LINES);
+                }
+                Some(Focus::Tree) => {
+                    loaded.focus = Focus::Tree;
+                    loaded.move_by(dir as i64 * WHEEL_TREE_ROWS);
+                }
+                None => {}
+            },
+            // The full-screen reader scrolls its view with the wheel too.
+            Screen::Reader(reader) => reader.scroll(dir * WHEEL_PREVIEW_LINES),
+            _ => {}
         }
     }
 
-    /// The cursor moved: focus-follows-mouse — the pane under the cursor gains
-    /// keyboard focus.
-    pub fn handle_mouse_moved(&mut self, col: u16, row: u16) {
+    /// A left click focuses the pane under the cursor (interact-to-focus). An
+    /// idle hover never changes focus — only deliberate interaction does.
+    pub fn handle_click(&mut self, col: u16, row: u16) {
         if let Screen::Loaded(loaded) = &mut self.screen
             && let Some(focus) = loaded.panes.hit(col, row)
         {
@@ -1036,21 +1087,21 @@ mod tests {
     }
 
     #[test]
-    fn mouse_move_focuses_the_pane_under_the_cursor() {
+    fn click_focuses_the_pane_under_the_cursor() {
         let mut app = sample_app();
         set_panes(&mut app);
-        app.handle_mouse_moved(90, 5);
+        app.handle_click(90, 5);
         assert_eq!(focus(&app), Focus::Preview);
-        app.handle_mouse_moved(5, 5);
+        app.handle_click(5, 5);
         assert_eq!(focus(&app), Focus::Tree);
-        // A point over neither pane leaves focus unchanged.
-        app.handle_mouse_moved(90, 5);
-        app.handle_mouse_moved(60, 5);
+        // A click over neither pane leaves focus unchanged.
+        app.handle_click(90, 5);
+        app.handle_click(60, 5);
         assert_eq!(focus(&app), Focus::Preview);
     }
 
     #[test]
-    fn scroll_over_tree_moves_selection_but_over_preview_does_not() {
+    fn wheel_moves_one_step_per_notch_and_focuses_the_pane() {
         let mut app = sample_app();
         set_panes(&mut app);
         select(&mut app, "src");
@@ -1058,12 +1109,40 @@ mod tests {
         select(&mut app, "src");
         let before = selected_index(&app);
 
-        app.handle_scroll(5, 5, 1); // over the tree
+        // Over the tree, one notch moves exactly one row — and a fat raw delta
+        // (terminals emit several events per notch) still moves only one row,
+        // not ten. The wheel also focuses the pane it acts on.
+        app.handle_scroll(5, 5, 5);
         assert_eq!(selected_index(&app), before + 1);
+        assert_eq!(focus(&app), Focus::Tree);
 
+        // Over the preview, the wheel scrolls the preview view (not the tree
+        // selection) and focuses the preview.
         let now = selected_index(&app);
-        app.handle_scroll(90, 5, 1); // over the preview
+        app.handle_scroll(90, 5, 1);
         assert_eq!(selected_index(&app), now);
+        assert_eq!(focus(&app), Focus::Preview);
+    }
+
+    #[test]
+    fn preview_refresh_is_gated_until_the_selection_settles() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "src");
+
+        // The selection differs from the cached preview, so a refresh is due —
+        // this is the signal the event loop debounces on, keeping the file read
+        // + syntax highlight off the per-frame navigation path.
+        assert!(app.preview_target_id().is_some());
+
+        // Once loaded the target clears, so nav frames request no more work.
+        app.refresh_preview();
+        assert_eq!(app.preview_target_id(), None);
+
+        // With the preview hidden there is never a target to refresh.
+        app.update(Action::TogglePreview);
+        select(&mut app, "README.md");
+        assert_eq!(app.preview_target_id(), None);
     }
 
     #[test]
