@@ -9,6 +9,7 @@ mod action;
 mod app;
 mod batch;
 mod cli;
+mod clipboard;
 mod collect;
 mod editor;
 mod error;

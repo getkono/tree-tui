@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 use ratatui::widgets::TableState;
 use ratatui_image::picker::Picker;
 
@@ -14,7 +15,45 @@ use crate::model::{
     self, ChurnData, CodeData, Layer, Lens, NodeId, NodeKind, SortDir, StatusData, SubKey, Tree,
 };
 use crate::scan::ScanOutcome;
+use crate::ui::codeview::CodeView;
 use crate::ui::preview::Preview;
+
+/// Which pane receives Normal-mode navigation keys and is drawn focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Tree,
+    Preview,
+}
+
+/// The pane rectangles from the last render, for mouse hit-testing. Only the
+/// focusable panes are tracked; a point over the detail pane or chrome hits
+/// neither and leaves focus unchanged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PaneRects {
+    pub tree: Rect,
+    pub preview: Option<Rect>,
+}
+
+impl PaneRects {
+    /// Which focusable pane (if any) contains the point.
+    pub fn hit(&self, col: u16, row: u16) -> Option<Focus> {
+        if self.preview.is_some_and(|r| contains(r, col, row)) {
+            Some(Focus::Preview)
+        } else if contains(self.tree, col, row) {
+            Some(Focus::Tree)
+        } else {
+            None
+        }
+    }
+}
+
+fn contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x
+        && col < r.x.saturating_add(r.width)
+        && row >= r.y
+        && row < r.y.saturating_add(r.height)
+}
 
 /// Which screen the app is currently showing.
 pub enum Screen {
@@ -59,6 +98,12 @@ pub struct Loaded {
     pub preview_for: Option<NodeId>,
     /// Cached preview content for the selected node.
     pub preview: Preview,
+    /// Scroll state for the text preview; rebuilt when the selection changes.
+    pub preview_view: CodeView,
+    /// Which pane has keyboard focus (and the highlighted border).
+    pub focus: Focus,
+    /// Pane rectangles from the last render, for mouse hit-testing.
+    pub panes: PaneRects,
     /// Active name filter (empty = no filter).
     pub filter: String,
     /// Hide rows whose value is zero under the active lens.
@@ -93,6 +138,10 @@ pub struct App {
     /// A lens whose data must be computed; drained by the event loop, which
     /// spawns the background collector.
     pub pending_compute: Option<Lens>,
+    /// A requested mouse-capture change (the release-capture toggle); drained by
+    /// the event loop, which owns the terminal. `Some(false)` releases capture
+    /// for native selection, `Some(true)` re-grabs it.
+    pub pending_capture: Option<bool>,
     /// Whether the root is inside a git repository (gates the git lenses).
     pub repo: bool,
     /// Terminal image-protocol picker for the preview pane, probed once at
@@ -113,6 +162,7 @@ impl App {
             should_quit: false,
             pending_open: None,
             pending_compute: None,
+            pending_capture: None,
             repo: false,
             picker: None,
         }
@@ -251,6 +301,64 @@ impl App {
         }
     }
 
+    /// Move keyboard focus between the tree and the preview pane. Only focuses
+    /// the preview when it is actually on screen.
+    fn cycle_focus(&mut self) {
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.focus = match loaded.focus {
+                Focus::Tree if loaded.panes.preview.is_some() => Focus::Preview,
+                _ => Focus::Tree,
+            };
+        }
+    }
+
+    /// Copy the focused pane's content to the system clipboard via OSC 52: the
+    /// visible preview text, or the selected node's path when the tree is focused.
+    fn yank(&mut self) {
+        let Screen::Loaded(loaded) = &self.screen else {
+            return;
+        };
+        let text = match loaded.focus {
+            Focus::Preview => loaded.preview_view.visible_text(),
+            Focus::Tree => loaded
+                .selected_id()
+                .map(|id| loaded.tree.nodes[id].rel_path.display().to_string())
+                .unwrap_or_default(),
+        };
+        if !text.is_empty() {
+            crate::clipboard::osc52_copy(&text);
+        }
+    }
+
+    /// Queue a mouse-capture flip for the event loop: releasing capture lets the
+    /// terminal's native click-drag selection work; toggling again re-grabs it.
+    fn toggle_mouse_capture(&mut self) {
+        self.pending_capture = Some(!crate::tui::mouse_captured());
+    }
+
+    /// A wheel scroll at a screen position: scroll whichever pane is under the
+    /// cursor, independent of which pane holds keyboard focus.
+    pub fn handle_scroll(&mut self, col: u16, row: u16, delta: i32) {
+        let Screen::Loaded(loaded) = &mut self.screen else {
+            return;
+        };
+        match loaded.panes.hit(col, row) {
+            Some(Focus::Preview) => loaded.preview_view.scroll_by(delta),
+            Some(Focus::Tree) => loaded.move_by(delta as i64),
+            None => {}
+        }
+    }
+
+    /// The cursor moved: focus-follows-mouse — the pane under the cursor gains
+    /// keyboard focus.
+    pub fn handle_mouse_moved(&mut self, col: u16, row: u16) {
+        if let Screen::Loaded(loaded) = &mut self.screen
+            && let Some(focus) = loaded.panes.hit(col, row)
+        {
+            loaded.focus = focus;
+        }
+    }
+
     fn clear_filter(&mut self) {
         if matches!(&self.screen, Screen::Loaded(l) if !l.filter.is_empty()) {
             self.set_filter(String::new());
@@ -274,6 +382,9 @@ impl App {
             Action::TogglePreview => self.toggle_preview(),
             Action::CycleLens => self.cycle_lens(),
             Action::JumpLens(n) => self.jump_lens(n),
+            Action::CycleFocus => self.cycle_focus(),
+            Action::Yank => self.yank(),
+            Action::ToggleMouseCapture => self.toggle_mouse_capture(),
             other => {
                 if let Screen::Loaded(loaded) = &mut self.screen {
                     loaded.handle(other);
@@ -376,6 +487,9 @@ impl Loaded {
             show_preview: true,
             preview_for: None,
             preview: Preview::Empty,
+            preview_view: CodeView::default(),
+            focus: Focus::Tree,
+            panes: PaneRects::default(),
             filter: String::new(),
             hide_zeros: false,
             active_lens: Lens::Code,
@@ -413,6 +527,11 @@ impl Loaded {
                 let path = root.join(&self.tree.nodes[id].rel_path);
                 crate::ui::preview::load(&path, picker)
             }
+        };
+        // Reset the preview's scroll state for the new content.
+        self.preview_view = match &self.preview {
+            Preview::Text(lines) => CodeView::new(lines.clone()),
+            _ => CodeView::default(),
         };
     }
 
@@ -620,6 +739,11 @@ impl Loaded {
     }
 
     fn handle(&mut self, action: Action) {
+        // When the preview pane is focused, navigation scrolls it instead of
+        // the tree; unhandled actions fall through to the tree below.
+        if self.focus == Focus::Preview && self.handle_preview_action(action) {
+            return;
+        }
         match action {
             Action::Down => self.move_by(1),
             Action::Up => self.move_by(-1),
@@ -646,6 +770,24 @@ impl Loaded {
             }
             _ => {}
         }
+    }
+
+    /// Route a navigation action to the focused preview pane. Returns whether it
+    /// was consumed (movement keys scroll the preview; anything else falls
+    /// through to the tree).
+    fn handle_preview_action(&mut self, action: Action) -> bool {
+        match action {
+            Action::Down => self.preview_view.scroll_by(1),
+            Action::Up => self.preview_view.scroll_by(-1),
+            Action::PageDown => self.preview_view.page(1),
+            Action::PageUp => self.preview_view.page(-1),
+            Action::First => self.preview_view.goto_top(),
+            Action::Last => self.preview_view.goto_bottom(),
+            Action::Collapse => self.preview_view.scroll_h(-4),
+            Action::Expand => self.preview_view.scroll_h(4),
+            _ => return false,
+        }
+        true
     }
 
     fn move_by(&mut self, delta: i64) {
@@ -815,6 +957,118 @@ mod tests {
             panic!("not loaded");
         };
         loaded.active_lens
+    }
+
+    /// Give the loaded screen a tree pane on the left and a preview on the right.
+    fn set_panes(app: &mut App) {
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.panes = PaneRects {
+                tree: Rect::new(0, 0, 40, 20),
+                preview: Some(Rect::new(80, 0, 40, 20)),
+            };
+        }
+    }
+
+    fn focus(app: &App) -> Focus {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.focus
+    }
+
+    fn selected_index(app: &App) -> usize {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.table_state.selected().unwrap()
+    }
+
+    #[test]
+    fn pane_hit_test_maps_point_to_focus() {
+        let panes = PaneRects {
+            tree: Rect::new(0, 0, 40, 20),
+            preview: Some(Rect::new(80, 0, 40, 20)),
+        };
+        assert_eq!(panes.hit(5, 5), Some(Focus::Tree));
+        assert_eq!(panes.hit(90, 5), Some(Focus::Preview));
+        assert_eq!(panes.hit(60, 5), None); // the gap between the panes
+        assert_eq!(panes.hit(5, 50), None); // below both panes
+    }
+
+    #[test]
+    fn mouse_move_focuses_the_pane_under_the_cursor() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        app.handle_mouse_moved(90, 5);
+        assert_eq!(focus(&app), Focus::Preview);
+        app.handle_mouse_moved(5, 5);
+        assert_eq!(focus(&app), Focus::Tree);
+        // A point over neither pane leaves focus unchanged.
+        app.handle_mouse_moved(90, 5);
+        app.handle_mouse_moved(60, 5);
+        assert_eq!(focus(&app), Focus::Preview);
+    }
+
+    #[test]
+    fn scroll_over_tree_moves_selection_but_over_preview_does_not() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "src");
+        app.update(Action::Expand); // reveal main.rs so there is room to move
+        select(&mut app, "src");
+        let before = selected_index(&app);
+
+        app.handle_scroll(5, 5, 1); // over the tree
+        assert_eq!(selected_index(&app), before + 1);
+
+        let now = selected_index(&app);
+        app.handle_scroll(90, 5, 1); // over the preview
+        assert_eq!(selected_index(&app), now);
+    }
+
+    #[test]
+    fn navigation_scrolls_the_preview_when_it_is_focused() {
+        let mut app = sample_app();
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        select(&mut app, "src");
+        let before = selected_index(&app);
+
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.focus = Focus::Preview;
+        }
+        app.update(Action::Down);
+        assert_eq!(
+            selected_index(&app),
+            before,
+            "tree selection must not move while the preview is focused"
+        );
+
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.focus = Focus::Tree;
+        }
+        app.update(Action::Down);
+        assert_eq!(selected_index(&app), before + 1);
+    }
+
+    #[test]
+    fn cycle_focus_requires_a_visible_preview() {
+        let mut app = sample_app();
+        app.update(Action::CycleFocus);
+        assert_eq!(focus(&app), Focus::Tree); // no preview rect recorded yet
+        set_panes(&mut app);
+        app.update(Action::CycleFocus);
+        assert_eq!(focus(&app), Focus::Preview);
+        app.update(Action::CycleFocus);
+        assert_eq!(focus(&app), Focus::Tree);
+    }
+
+    #[test]
+    fn toggle_mouse_capture_queues_a_flip() {
+        let mut app = sample_app();
+        app.update(Action::ToggleMouseCapture);
+        // Capture starts off in tests (tui::init never ran), so this requests on.
+        assert_eq!(app.pending_capture, Some(true));
     }
 
     #[test]

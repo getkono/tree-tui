@@ -142,14 +142,21 @@ fn apply_effect(
         Effect::Key(key) => {
             app.handle_key(key);
             drain_pending_open(terminal, app)?;
+            drain_pending_capture(app);
         }
-        // Mouse handling lights up with the focusable preview pane (issue #23);
-        // until mouse capture is enabled these effects never arrive.
-        Effect::Scroll { .. } | Effect::MouseMoved { .. } => {}
+        Effect::Scroll { col, row, delta } => app.handle_scroll(col, row, delta),
+        Effect::MouseMoved { col, row } => app.handle_mouse_moved(col, row),
         // The resize itself needs nothing; the caller's redraw repaints.
         Effect::Resize => {}
     }
     Ok(())
+}
+
+/// Apply a queued mouse-capture flip from the release-capture toggle.
+fn drain_pending_capture(app: &mut App) {
+    if let Some(on) = app.pending_capture.take() {
+        let _ = tui::set_mouse_capture(on);
+    }
 }
 
 /// Suspend the TUI to run `$PAGER`/`$EDITOR` if a key queued an open. Drained

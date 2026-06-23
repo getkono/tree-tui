@@ -19,7 +19,7 @@ use tokei::LanguageType;
 use unicode_width::UnicodeWidthStr;
 
 use super::theme;
-use crate::app::Loaded;
+use crate::app::{Focus, Loaded};
 use crate::model::{CodeNum, ColumnSpec, Lens, NodeId, NodeKind, SubKey, TreeNode};
 
 /// Width of every numeric column (fits `comments`, `modified`, and grouped
@@ -188,7 +188,11 @@ pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
         .highlight_symbol("▌ ")
         .block(
             Block::bordered()
-                .border_style(Style::default().fg(theme::MUTED))
+                .border_style(Style::default().fg(if loaded.focus == Focus::Tree {
+                    theme::ACCENT
+                } else {
+                    theme::MUTED
+                }))
                 .title(" tree "),
         );
 

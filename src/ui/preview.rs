@@ -16,8 +16,8 @@ use ratatui_image::StatefulImage;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
-use super::{syntax, theme};
-use crate::app::Loaded;
+use super::{codeview, syntax, theme};
+use crate::app::{Focus, Loaded};
 
 /// Largest file we read for a text preview.
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
@@ -102,20 +102,24 @@ fn load_text(path: &Path) -> Preview {
 
 /// Render the preview pane for the current selection into `area`.
 pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
+    let focused = loaded.focus == Focus::Preview;
+
+    // Text scrolls through the shared code-view, which owns its own border.
+    if matches!(loaded.preview, Preview::Text(_)) {
+        codeview::render(frame, &mut loaded.preview_view, area, " preview ", focused);
+        return;
+    }
+
+    let border = if focused { theme::ACCENT } else { theme::MUTED };
     let block = Block::bordered()
         .title(" preview ")
-        .border_style(Style::default().fg(theme::MUTED))
+        .border_style(Style::default().fg(border))
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     match &mut loaded.preview {
-        Preview::Empty => {}
-        Preview::Text(lines) => {
-            // Clip to the visible height to avoid cloning the whole prefix.
-            let rows: Vec<Line> = lines.iter().take(inner.height as usize).cloned().collect();
-            frame.render_widget(Paragraph::new(rows), inner);
-        }
+        Preview::Empty | Preview::Text(_) => {}
         Preview::Image(protocol) => {
             frame.render_stateful_widget(
                 StatefulImage::<StatefulProtocol>::new(),

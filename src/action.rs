@@ -38,6 +38,12 @@ pub enum Action {
     JumpLens(u8),
     /// Toggle hiding rows that are zero under the active lens.
     ToggleZeros,
+    /// Move focus between the tree and the preview pane.
+    CycleFocus,
+    /// Copy the focused pane's text (preview) or the selected path (tree).
+    Yank,
+    /// Toggle mouse capture so the terminal's native selection works.
+    ToggleMouseCapture,
 }
 
 /// Translate a key press into an [`Action`].
@@ -69,6 +75,9 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('m') => Action::CycleLens,
         KeyCode::Char(c @ '1'..='9') => Action::JumpLens(c as u8 - b'0'),
         KeyCode::Char('z') => Action::ToggleZeros,
+        KeyCode::Char('w') => Action::CycleFocus,
+        KeyCode::Char('y') => Action::Yank,
+        KeyCode::Char('S') => Action::ToggleMouseCapture,
         _ => Action::None,
     }
 }
