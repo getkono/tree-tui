@@ -24,6 +24,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ("r", "reverse the sort order"),
     ("z", "hide rows that are zero under the lens"),
     ("d / Tab", "toggle the detail panel"),
+    ("p", "toggle the preview pane"),
     ("/", "filter by name (Esc clears)"),
     ("?", "toggle this help"),
     ("q / Ctrl-c", "quit"),

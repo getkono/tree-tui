@@ -1,11 +1,12 @@
 //! Application state and the update reducer.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::TableState;
+use ratatui_image::picker::Picker;
 
 use crate::action::{self, Action};
 use crate::collect::LayerResult;
@@ -13,6 +14,7 @@ use crate::model::{
     self, ChurnData, CodeData, Layer, Lens, NodeId, NodeKind, SortDir, StatusData, SubKey, Tree,
 };
 use crate::scan::ScanOutcome;
+use crate::ui::preview::Preview;
 
 /// Which screen the app is currently showing.
 pub enum Screen {
@@ -49,6 +51,14 @@ pub struct Loaded {
     pub duration: Duration,
     /// Whether the detail panel is shown.
     pub show_detail: bool,
+    /// Whether the preview pane is enabled (it still folds away when the
+    /// terminal is too narrow or short — see the renderer's thresholds).
+    pub show_preview: bool,
+    /// The node whose preview is currently cached, to skip reloading on every
+    /// frame; refreshed when the selection changes.
+    pub preview_for: Option<NodeId>,
+    /// Cached preview content for the selected node.
+    pub preview: Preview,
     /// Active name filter (empty = no filter).
     pub filter: String,
     /// Hide rows whose value is zero under the active lens.
@@ -85,6 +95,9 @@ pub struct App {
     pub pending_compute: Option<Lens>,
     /// Whether the root is inside a git repository (gates the git lenses).
     pub repo: bool,
+    /// Terminal image-protocol picker for the preview pane, probed once at
+    /// startup. `None` in tests and when the terminal can't be queried.
+    pub picker: Option<Picker>,
 }
 
 impl App {
@@ -101,6 +114,7 @@ impl App {
             pending_open: None,
             pending_compute: None,
             repo: false,
+            picker: None,
         }
     }
 
@@ -231,6 +245,12 @@ impl App {
         }
     }
 
+    fn toggle_preview(&mut self) {
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.show_preview = !loaded.show_preview;
+        }
+    }
+
     fn clear_filter(&mut self) {
         if matches!(&self.screen, Screen::Loaded(l) if !l.filter.is_empty()) {
             self.set_filter(String::new());
@@ -251,6 +271,7 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::Open => self.open_selected(),
             Action::Edit => self.edit_selected(),
+            Action::TogglePreview => self.toggle_preview(),
             Action::CycleLens => self.cycle_lens(),
             Action::JumpLens(n) => self.jump_lens(n),
             other => {
@@ -352,6 +373,9 @@ impl Loaded {
             viewport_rows: 1,
             duration,
             show_detail: false,
+            show_preview: true,
+            preview_for: None,
+            preview: Preview::Empty,
             filter: String::new(),
             hide_zeros: false,
             active_lens: Lens::Code,
@@ -369,6 +393,27 @@ impl Loaded {
         self.table_state
             .selected()
             .and_then(|i| self.visible.get(i).copied())
+    }
+
+    /// Load the preview for the current selection if it isn't already cached.
+    /// Called by the renderer only while the preview pane is visible, so the
+    /// bounded file read happens lazily and at most once per selection.
+    pub fn ensure_preview(&mut self, root: &Path, picker: Option<&Picker>) {
+        let id = self.selected_id();
+        if id == self.preview_for {
+            return;
+        }
+        self.preview_for = id;
+        self.preview = match id {
+            None => Preview::Empty,
+            Some(id) if self.tree.nodes[id].is_dir() => {
+                Preview::Info(format!("{} — directory", self.display_name(id)))
+            }
+            Some(id) => {
+                let path = root.join(&self.tree.nodes[id].rel_path);
+                crate::ui::preview::load(&path, picker)
+            }
+        };
     }
 
     /// The value of `key` for node `id`, reading the node fields or the relevant
