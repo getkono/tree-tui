@@ -18,8 +18,10 @@ pub enum Action {
     PageDown,
     /// Expand a collapsed dir, or descend into an expanded one.
     Expand,
-    /// Activate the selection: expand/descend a dir, or open a file in $EDITOR.
+    /// Activate the selection: expand/descend a dir, or view a file in $PAGER.
     Open,
+    /// Edit the selected file in $EDITOR (Shift+Enter, or `e`).
+    Edit,
     /// Collapse an expanded dir, or move to the parent.
     Collapse,
     /// Toggle expansion of the selected dir.
@@ -39,6 +41,7 @@ pub enum Action {
 /// Translate a key press into an [`Action`].
 pub fn map_key(key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     match key.code {
         KeyCode::Char('c') if ctrl => Action::Quit,
         KeyCode::Char('d') if ctrl => Action::PageDown,
@@ -51,7 +54,9 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::PageDown => Action::PageDown,
         KeyCode::PageUp => Action::PageUp,
         KeyCode::Char('l') | KeyCode::Right => Action::Expand,
+        KeyCode::Enter if shift => Action::Edit,
         KeyCode::Enter => Action::Open,
+        KeyCode::Char('e') => Action::Edit,
         KeyCode::Char('h') | KeyCode::Left => Action::Collapse,
         KeyCode::Char(' ') => Action::Toggle,
         KeyCode::Char('E') => Action::ExpandAll,
