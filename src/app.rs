@@ -28,6 +28,14 @@ pub enum Mode {
     Filter,
 }
 
+/// How a queued file open should hand off to an external program: `View` runs
+/// the pager (`$PAGER`), `Edit` runs the editor (`$VISUAL`/`$EDITOR`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenMode {
+    View,
+    Edit,
+}
+
 /// State for the loaded, interactive tree.
 pub struct Loaded {
     pub tree: Tree,
@@ -67,9 +75,10 @@ pub struct App {
     pub spinner: usize,
     pub elapsed: Duration,
     pub should_quit: bool,
-    /// A file the user asked to open in their editor, drained by the event loop
-    /// (which owns the terminal) after each key press.
-    pub pending_open: Option<PathBuf>,
+    /// A file the user asked to open externally (view in `$PAGER` or edit in
+    /// `$EDITOR`), drained by the event loop (which owns the terminal) after each
+    /// key press.
+    pub pending_open: Option<(PathBuf, OpenMode)>,
     /// A lens whose data must be computed; drained by the event loop, which
     /// spawns the background collector.
     pub pending_compute: Option<Lens>,
@@ -212,6 +221,7 @@ impl App {
             Action::None => {}
             Action::Quit => self.should_quit = true,
             Action::Open => self.open_selected(),
+            Action::Edit => self.edit_selected(),
             Action::CycleLens => self.cycle_lens(),
             Action::JumpLens(n) => self.jump_lens(n),
             other => {
@@ -265,7 +275,7 @@ impl App {
     }
 
     /// Enter on the selection: expand/descend a directory, or queue the selected
-    /// file to open in the user's editor.
+    /// file to view in the user's pager.
     fn open_selected(&mut self) {
         let Screen::Loaded(loaded) = &mut self.screen else {
             return;
@@ -278,7 +288,29 @@ impl App {
             return;
         }
         let rel_path = loaded.tree.nodes[id].rel_path.clone();
-        self.pending_open = Some(self.root.join(rel_path));
+        self.pending_open = Some((self.root.join(rel_path), OpenMode::View));
+    }
+
+    /// Shift+Enter / `e` on the selection: queue the selected file to edit in the
+    /// user's editor. A no-op on directories.
+    fn edit_selected(&mut self) {
+        if let Some(path) = self.selected_file_path() {
+            self.pending_open = Some((path, OpenMode::Edit));
+        }
+    }
+
+    /// The absolute path of the selected node when it is a file, else `None`
+    /// (no side effects).
+    fn selected_file_path(&self) -> Option<PathBuf> {
+        let Screen::Loaded(loaded) = &self.screen else {
+            return None;
+        };
+        let id = loaded.selected_id()?;
+        if loaded.tree.nodes[id].is_dir() {
+            return None;
+        }
+        let rel_path = loaded.tree.nodes[id].rel_path.clone();
+        Some(self.root.join(rel_path))
     }
 }
 
@@ -670,11 +702,35 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_file_queues_it_for_the_editor() {
+    fn enter_on_a_file_queues_it_for_viewing() {
         let mut app = sample_app();
         select(&mut app, "README.md");
         app.update(Action::Open);
-        assert_eq!(app.pending_open, Some(PathBuf::from("/proj/README.md")));
+        assert_eq!(
+            app.pending_open,
+            Some((PathBuf::from("/proj/README.md"), OpenMode::View))
+        );
+    }
+
+    #[test]
+    fn edit_on_a_file_queues_it_for_editing() {
+        let mut app = sample_app();
+        select(&mut app, "README.md");
+        app.update(Action::Edit);
+        assert_eq!(
+            app.pending_open,
+            Some((PathBuf::from("/proj/README.md"), OpenMode::Edit))
+        );
+    }
+
+    #[test]
+    fn edit_on_a_directory_is_a_noop() {
+        let mut app = sample_app();
+        select(&mut app, "src");
+        app.update(Action::Edit);
+        assert!(app.pending_open.is_none());
+        // Unlike Enter, editing a directory does not expand it.
+        assert!(!is_visible(&app, "main.rs"));
     }
 
     #[test]

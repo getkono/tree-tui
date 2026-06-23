@@ -7,9 +7,9 @@ use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc;
 
-use crate::app::{App, Screen};
+use crate::app::{App, OpenMode, Screen};
 use crate::collect::{self, LayerResult};
-use crate::{editor, scan, tui, ui};
+use crate::{editor, pager, scan, tui, ui};
 
 /// Drive the app until the user quits or input is exhausted.
 ///
@@ -34,8 +34,11 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                     app.handle_key(key);
-                    if let Some(path) = app.pending_open.take() {
-                        tui::suspended(terminal, || editor::open(&path))?;
+                    if let Some((path, mode)) = app.pending_open.take() {
+                        match mode {
+                            OpenMode::View => tui::suspended(terminal, || pager::open(&path))?,
+                            OpenMode::Edit => tui::suspended(terminal, || editor::open(&path))?,
+                        }
                     }
                     redraw = true;
                 }
