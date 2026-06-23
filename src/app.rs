@@ -1,5 +1,6 @@
 //! Application state and the update reducer.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -131,6 +132,34 @@ impl App {
 
     pub fn on_scan_failed(&mut self, message: impl Into<String>) {
         self.screen = Screen::Error(message.into());
+    }
+
+    /// Re-apply a fresh walk after a filesystem change.
+    ///
+    /// A no-op when the visible skeleton (paths + sizes) is unchanged, so
+    /// spurious events — builds, git internals, and other gitignored/hidden
+    /// paths absent from the walk — cost only a cheap re-walk. Otherwise the
+    /// tree is rebuilt (preserving expansion and selection by path) and the
+    /// cached metric layers are invalidated, with the active lens re-requested.
+    pub fn on_rescan(&mut self, outcome: ScanOutcome) {
+        let Screen::Loaded(loaded) = &mut self.screen else {
+            // Still loading: treat this as the initial scan.
+            self.on_scan(outcome);
+            return;
+        };
+        if loaded.same_skeleton(&outcome.tree) {
+            return;
+        }
+        loaded.reload(outcome.tree, outcome.duration);
+        let active = loaded.active_lens;
+        let needs_layer = active.has_layer();
+        if needs_layer {
+            loaded.mark_computing(active);
+        }
+        self.repo = outcome.repo;
+        if needs_layer {
+            self.pending_compute = Some(active);
+        }
     }
 
     /// Apply a freshly-computed lens layer (from a background collector).
@@ -448,6 +477,61 @@ impl Loaded {
         self.active_lens = lens;
         self.sort_key = lens.default_sub_key();
         self.apply_sort();
+    }
+
+    /// Whether `other` has the same paths and per-node sizes as the current
+    /// tree — i.e. nothing the walk can see has changed.
+    fn same_skeleton(&self, other: &Tree) -> bool {
+        if self.tree.nodes.len() != other.nodes.len() || self.tree.index.len() != other.index.len()
+        {
+            return false;
+        }
+        self.tree.index.iter().all(|(path, &id)| {
+            other
+                .index
+                .get(path)
+                .is_some_and(|&oid| other.nodes[oid].bytes == self.tree.nodes[id].bytes)
+        })
+    }
+
+    /// Swap in a freshly-walked `tree`, preserving expansion and selection by
+    /// path (node ids are not stable across walks) and invalidating the cached
+    /// metric layers.
+    fn reload(&mut self, tree: Tree, duration: Duration) {
+        let expanded: HashSet<PathBuf> = self
+            .tree
+            .nodes
+            .iter()
+            .filter(|n| n.is_dir() && n.expanded)
+            .map(|n| n.rel_path.clone())
+            .collect();
+        let selected_path = self
+            .selected_id()
+            .map(|id| self.tree.nodes[id].rel_path.clone());
+
+        self.tree = tree;
+        self.duration = duration;
+        self.inaccurate = false;
+        self.code = Layer::NotComputed;
+        self.churn = Layer::NotComputed;
+        self.status = Layer::NotComputed;
+
+        // Re-apply expansion (the root is already expanded by build_skeleton).
+        for node in &mut self.tree.nodes {
+            if node.is_dir() && expanded.contains(&node.rel_path) {
+                node.expanded = true;
+            }
+        }
+
+        self.apply_sort(); // rebuilds the visible list
+
+        // Restore the selection on the same path when it still exists.
+        if let Some(path) = selected_path
+            && let Some(&id) = self.tree.index.get(&path)
+            && let Some(pos) = self.visible.iter().position(|&n| n == id)
+        {
+            self.table_state.select(Some(pos));
+        }
     }
 
     /// Re-order siblings by the current sort key/direction, then rebuild the
@@ -857,5 +941,83 @@ mod tests {
         assert!(!is_visible(&app, "src"));
         app.update(Action::ToggleZeros);
         assert!(is_visible(&app, "src"));
+    }
+
+    #[test]
+    fn on_rescan_preserves_view_and_invalidates_layers() {
+        let mut app = sample_app();
+        // Expand `src` and select `main.rs` within it.
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        select(&mut app, "main.rs");
+
+        // A new walk that adds `src/new.rs` (so the skeleton differs).
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 1000),
+            (PathBuf::from("README.md"), 200),
+            (PathBuf::from("src/new.rs"), 50),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+        });
+
+        // Expansion preserved (main.rs still visible) and the new file appears.
+        assert!(is_visible(&app, "main.rs"));
+        assert!(is_visible(&app, "new.rs"));
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        // Selection preserved by path.
+        let selected = loaded.selected_id().unwrap();
+        assert_eq!(loaded.tree.nodes[selected].name, "main.rs");
+        // The active (code) layer was invalidated and re-requested.
+        assert!(loaded.code.is_computing());
+        assert_eq!(app.pending_compute, Some(Lens::Code));
+    }
+
+    #[test]
+    fn on_rescan_is_a_noop_when_the_skeleton_is_unchanged() {
+        let mut app = sample_app();
+        // Make the code layer Ready, then clear the pending request.
+        let mut files = HashMap::new();
+        files.insert(
+            PathBuf::from("src/main.rs"),
+            CodeData {
+                num: CodeNum {
+                    code: 10,
+                    comments: 0,
+                    blanks: 0,
+                },
+                ..Default::default()
+            },
+        );
+        app.on_layer(LayerResult::Code {
+            files,
+            inaccurate: false,
+        });
+        app.pending_compute = None;
+
+        // Re-walk with an identical skeleton (same paths + sizes).
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 1000),
+            (PathBuf::from("README.md"), 200),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+        });
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        // Nothing changed: the layer stays Ready and no recompute is requested.
+        assert!(loaded.code_at(loaded.tree.root).is_some());
+        assert!(app.pending_compute.is_none());
     }
 }
