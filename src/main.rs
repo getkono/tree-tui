@@ -7,6 +7,7 @@
 
 mod action;
 mod app;
+mod batch;
 mod cli;
 mod collect;
 mod editor;

@@ -2,12 +2,13 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyEventKind};
-use futures::StreamExt;
+use crossterm::event::EventStream;
+use futures::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::{App, OpenMode, Screen};
+use crate::batch::{self, Effect};
 use crate::collect::{self, LayerResult};
 use crate::scan::ScanOutcome;
 use crate::{editor, pager, scan, tui, ui, watch};
@@ -37,21 +38,39 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
     while !app.should_quit {
         let mut redraw = false;
         tokio::select! {
-            maybe_event = events.next() => match maybe_event {
-                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    app.handle_key(key);
-                    if let Some((path, mode)) = app.pending_open.take() {
-                        match mode {
-                            OpenMode::View => tui::suspended(terminal, || pager::open(&path))?,
-                            OpenMode::Edit => tui::suspended(terminal, || editor::open(&path))?,
-                        }
+            maybe_event = events.next() => {
+                // Handle the first event, then drain everything else that is
+                // immediately ready into one burst. Coalescing collapses wheel
+                // and move runs so a flood becomes a single net change and a
+                // single redraw (issue #22).
+                let first = match maybe_event {
+                    Some(Ok(ev)) => ev,
+                    Some(Err(err)) => return Err(err.into()),
+                    None => {
+                        app.should_quit = true;
+                        continue;
                     }
-                    redraw = true;
+                };
+                let mut burst = vec![first];
+                while burst.len() < batch::MAX_BATCH {
+                    match events.next().now_or_never() {
+                        Some(Some(Ok(ev))) => burst.push(ev),
+                        Some(Some(Err(err))) => return Err(err.into()),
+                        Some(None) => {
+                            app.should_quit = true;
+                            break;
+                        }
+                        // Nothing more is ready right now: stop draining.
+                        None => break,
+                    }
                 }
-                Some(Ok(Event::Resize(_, _))) => redraw = true,
-                Some(Ok(_)) => {}
-                Some(Err(err)) => return Err(err.into()),
-                None => app.should_quit = true,
+                for effect in batch::coalesce(burst) {
+                    apply_effect(terminal, app, effect)?;
+                    if app.should_quit {
+                        break;
+                    }
+                }
+                redraw = true;
             },
             result = &mut scan_rx, if matches!(app.screen, Screen::Loading) => {
                 match result {
@@ -107,6 +126,39 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
         }
         if redraw {
             terminal.draw(|frame| ui::render(frame, app))?;
+        }
+    }
+    Ok(())
+}
+
+/// Apply one coalesced [`Effect`] to the app, handling any external handoff it
+/// triggers. The caller redraws once after the whole batch.
+fn apply_effect(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    effect: Effect,
+) -> color_eyre::Result<()> {
+    match effect {
+        Effect::Key(key) => {
+            app.handle_key(key);
+            drain_pending_open(terminal, app)?;
+        }
+        // Mouse handling lights up with the focusable preview pane (issue #23);
+        // until mouse capture is enabled these effects never arrive.
+        Effect::Scroll { .. } | Effect::MouseMoved { .. } => {}
+        // The resize itself needs nothing; the caller's redraw repaints.
+        Effect::Resize => {}
+    }
+    Ok(())
+}
+
+/// Suspend the TUI to run `$PAGER`/`$EDITOR` if a key queued an open. Drained
+/// per key so two opens in one burst each suspend and restore correctly.
+fn drain_pending_open(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
+    if let Some((path, mode)) = app.pending_open.take() {
+        match mode {
+            OpenMode::View => tui::suspended(terminal, || pager::open(&path))?,
+            OpenMode::Edit => tui::suspended(terminal, || editor::open(&path))?,
         }
     }
     Ok(())
