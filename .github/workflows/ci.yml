@@ -14,7 +14,7 @@ jobs:
     name: Format, Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -33,7 +33,7 @@ jobs:
     # Only PRs carry an unmerged commit series worth linting; pushes to master are history.
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # convco needs full history to walk the commit range
       # mise provisions convco (see mise.toml); the build is cached across runs.
