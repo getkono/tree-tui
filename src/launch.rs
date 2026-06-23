@@ -13,11 +13,22 @@ use std::process::Command;
 /// Run `spec` against `path`, blocking until it exits. `kind` ("editor" or
 /// "pager") only labels the log lines.
 pub fn run(kind: &'static str, spec: &str, path: &Path) {
+    run_with_extra(kind, spec, &[], path);
+}
+
+/// Like [`run`], but inserts `extra` arguments between the spec's flags and the
+/// path (e.g. a `+LINE` jump for `$EDITOR`).
+pub fn run_with_extra(kind: &'static str, spec: &str, extra: &[String], path: &Path) {
     let Some((program, args)) = split_command(spec) else {
         tracing::warn!(kind, "open command is empty; cannot open a file");
         return;
     };
-    match Command::new(program).args(args).arg(path).status() {
+    match Command::new(program)
+        .args(args)
+        .args(extra)
+        .arg(path)
+        .status()
+    {
         Ok(status) if status.success() => {}
         Ok(status) => {
             tracing::warn!(kind, command = %spec, %status, "external program exited non-zero")

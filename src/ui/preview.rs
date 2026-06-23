@@ -50,27 +50,38 @@ pub fn load(path: &Path, picker: Option<&Picker>) -> Preview {
 }
 
 fn load_image(path: &Path, picker: Option<&Picker>) -> Preview {
+    match decode_image(path, picker) {
+        Ok(protocol) => Preview::Image(protocol),
+        Err(message) => Preview::Info(message),
+    }
+}
+
+/// Decode `path` into a resize protocol for inline display, or an explanatory
+/// message. Shared by the preview pane and the full-screen reader.
+pub(super) fn decode_image(
+    path: &Path,
+    picker: Option<&Picker>,
+) -> Result<Box<StatefulProtocol>, String> {
     let Some(picker) = picker else {
-        return Preview::Info("image preview is not supported by this terminal".into());
+        return Err("image preview is not supported by this terminal".into());
     };
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() > MAX_IMAGE_BYTES => {
-            return Preview::Info(format!(
+            return Err(format!(
                 "image too large to preview ({})",
                 theme::human_bytes(meta.len())
             ));
         }
         Ok(_) => {}
-        Err(err) => return Preview::Info(format!("cannot read image: {err}")),
+        Err(err) => return Err(format!("cannot read image: {err}")),
     }
-    let reader = match image::ImageReader::open(path).and_then(|r| r.with_guessed_format()) {
-        Ok(reader) => reader,
-        Err(err) => return Preview::Info(format!("cannot read image: {err}")),
-    };
-    match reader.decode() {
-        Ok(img) => Preview::Image(Box::new(picker.new_resize_protocol(img))),
-        Err(err) => Preview::Info(format!("cannot decode image: {err}")),
-    }
+    let reader = image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .map_err(|err| format!("cannot read image: {err}"))?;
+    let img = reader
+        .decode()
+        .map_err(|err| format!("cannot decode image: {err}"))?;
+    Ok(Box::new(picker.new_resize_protocol(img)))
 }
 
 fn load_text(path: &Path) -> Preview {

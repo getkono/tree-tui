@@ -7,10 +7,11 @@ use futures::{FutureExt, StreamExt};
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::app::{App, OpenMode, Screen};
+use crate::app::{App, Screen};
 use crate::batch::{self, Effect};
 use crate::collect::{self, LayerResult};
 use crate::scan::ScanOutcome;
+use crate::ui::reader::Handoff;
 use crate::{editor, pager, scan, tui, ui, watch};
 
 /// Drive the app until the user quits or input is exhausted.
@@ -141,7 +142,8 @@ fn apply_effect(
     match effect {
         Effect::Key(key) => {
             app.handle_key(key);
-            drain_pending_open(terminal, app)?;
+            drain_pending_edit(terminal, app)?;
+            drain_reader_handoff(terminal, app)?;
             drain_pending_capture(app);
         }
         Effect::Scroll { col, row, delta } => app.handle_scroll(col, row, delta),
@@ -159,14 +161,25 @@ fn drain_pending_capture(app: &mut App) {
     }
 }
 
-/// Suspend the TUI to run `$PAGER`/`$EDITOR` if a key queued an open. Drained
-/// per key so two opens in one burst each suspend and restore correctly.
-fn drain_pending_open(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
-    if let Some((path, mode)) = app.pending_open.take() {
-        match mode {
-            OpenMode::View => tui::suspended(terminal, || pager::open(&path))?,
-            OpenMode::Edit => tui::suspended(terminal, || editor::open(&path))?,
+/// Suspend the TUI to run `$EDITOR`/`$PAGER` if the reader queued a handoff. The
+/// reader stays open across it, so we return to the reader on the way back.
+fn drain_reader_handoff(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
+    if let Some(handoff) = app.take_reader_handoff() {
+        match handoff {
+            Handoff::EditAtLine { path, line } => {
+                tui::suspended(terminal, || editor::open_at_line(&path, line))?
+            }
+            Handoff::Pager { path } => tui::suspended(terminal, || pager::open(&path))?,
         }
+    }
+    Ok(())
+}
+
+/// Suspend the TUI to run `$EDITOR` if a key queued an edit. Drained per key so
+/// two edits in one burst each suspend and restore correctly.
+fn drain_pending_edit(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
+    if let Some(path) = app.pending_edit.take() {
+        tui::suspended(terminal, || editor::open(&path))?;
     }
     Ok(())
 }

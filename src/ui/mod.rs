@@ -7,6 +7,7 @@ mod header;
 mod help;
 mod loading;
 pub mod preview;
+pub mod reader;
 mod syntax;
 pub mod theme;
 mod tree_view;
@@ -35,6 +36,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_loaded(frame, app, area);
     } else if matches!(app.screen, Screen::Loading) {
         loading::render(frame, app, area);
+    } else if let Screen::Reader(reader) = &mut app.screen {
+        reader::render(frame, reader, area);
     } else if let Screen::Error(message) = &app.screen {
         render_error(frame, message, area);
     }

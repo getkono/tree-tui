@@ -13,7 +13,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ("g / G", "jump to top / bottom"),
     ("Ctrl-d / Ctrl-u", "page down / up"),
     ("l / →", "expand, or descend into a directory"),
-    ("Enter", "view a file in $PAGER · expand a directory"),
+    ("Enter", "open a file in the reader · expand a directory"),
     ("Shift-Enter / e", "edit a file in $EDITOR"),
     ("h / ←", "collapse, or jump to the parent"),
     ("Space", "toggle the selected directory"),

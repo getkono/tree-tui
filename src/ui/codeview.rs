@@ -5,9 +5,11 @@
 //! border. Shared by the side-by-side preview pane and (later) the full-screen
 //! file reader, so both scroll identically.
 
+use std::collections::HashSet;
+
 use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -28,6 +30,10 @@ pub struct CodeView {
     viewport: (u16, u16),
     /// Widest line in display cells, cached for the horizontal clamp.
     max_width: usize,
+    /// Zero-based line indices to emphasize (search matches).
+    matches: HashSet<usize>,
+    /// The current match's line index, drawn more prominently.
+    current_match: Option<usize>,
 }
 
 impl CodeView {
@@ -74,6 +80,58 @@ impl CodeView {
             .map(line_to_plain)
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Total number of lines in the document.
+    pub fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// The first visible (top) line, zero-based.
+    pub fn top(&self) -> usize {
+        self.top
+    }
+
+    /// Rows of text the viewport can show (for half-page steps).
+    pub fn viewport_rows(&self) -> usize {
+        self.page_rows()
+    }
+
+    /// Scroll so that 1-based `line` is visible, roughly centered.
+    pub fn goto_line(&mut self, one_based: usize) {
+        let target = one_based
+            .saturating_sub(1)
+            .min(self.lines.len().saturating_sub(1));
+        let half = self.page_rows() / 2;
+        self.top = target.saturating_sub(half).min(self.max_top());
+    }
+
+    /// Zero-based indices of lines containing `needle` (already lowercased).
+    pub fn matching_lines(&self, needle: &str) -> Vec<usize> {
+        self.lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line_to_plain(line).to_lowercase().contains(needle))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Highlight `matches` (zero-based line indices), with `current` drawn more
+    /// prominently.
+    pub fn set_matches(&mut self, matches: &[usize], current: Option<usize>) {
+        self.matches = matches.iter().copied().collect();
+        self.current_match = current;
+    }
+
+    /// Move the prominent highlight to a different matching line.
+    pub fn set_current_match(&mut self, line: Option<usize>) {
+        self.current_match = line;
+    }
+
+    /// Drop all match highlights.
+    pub fn clear_matches(&mut self) {
+        self.matches.clear();
+        self.current_match = None;
     }
 
     /// Rows of text the viewport can show.
@@ -130,7 +188,16 @@ pub fn render(frame: &mut Frame, view: &mut CodeView, area: Rect, title: &str, f
         );
         let mut spans = vec![number];
         spans.extend(shift_line(line, view.left));
-        out.push(Line::from(spans));
+        let mut out_line = Line::from(spans);
+        // Emphasize search matches; the current match is bold.
+        if Some(i) == view.current_match {
+            out_line.style = Style::default()
+                .bg(theme::SELECTION_BG)
+                .add_modifier(Modifier::BOLD);
+        } else if view.matches.contains(&i) {
+            out_line.style = Style::default().bg(theme::SELECTION_BG);
+        }
+        out.push(out_line);
     }
     frame.render_widget(Paragraph::new(out), inner);
 

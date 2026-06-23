@@ -17,6 +17,7 @@ use crate::model::{
 use crate::scan::ScanOutcome;
 use crate::ui::codeview::CodeView;
 use crate::ui::preview::Preview;
+use crate::ui::reader::{Handoff, Reader, ReaderExit};
 
 /// Which pane receives Normal-mode navigation keys and is drawn focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -60,6 +61,8 @@ pub enum Screen {
     Loading,
     // Boxed: `Loaded` is much larger than the other variants.
     Loaded(Box<Loaded>),
+    /// The full-screen file reader; owns the suspended tree, restored on exit.
+    Reader(Box<Reader>),
     Error(String),
 }
 
@@ -68,14 +71,6 @@ pub enum Screen {
 pub enum Mode {
     Normal,
     Filter,
-}
-
-/// How a queued file open should hand off to an external program: `View` runs
-/// the pager (`$PAGER`), `Edit` runs the editor (`$VISUAL`/`$EDITOR`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenMode {
-    View,
-    Edit,
 }
 
 /// State for the loaded, interactive tree.
@@ -131,10 +126,10 @@ pub struct App {
     pub spinner: usize,
     pub elapsed: Duration,
     pub should_quit: bool,
-    /// A file the user asked to open externally (view in `$PAGER` or edit in
-    /// `$EDITOR`), drained by the event loop (which owns the terminal) after each
-    /// key press.
-    pub pending_open: Option<(PathBuf, OpenMode)>,
+    /// A file the user asked to edit in `$EDITOR` (Shift+Enter / `e`), drained by
+    /// the event loop (which owns the terminal) after each key press. Viewing now
+    /// opens the in-TUI reader instead of shelling out to `$PAGER`.
+    pub pending_edit: Option<PathBuf>,
     /// A lens whose data must be computed; drained by the event loop, which
     /// spawns the background collector.
     pub pending_compute: Option<Lens>,
@@ -160,7 +155,7 @@ impl App {
             spinner: 0,
             elapsed: Duration::ZERO,
             should_quit: false,
-            pending_open: None,
+            pending_edit: None,
             pending_compute: None,
             pending_capture: None,
             repo: false,
@@ -173,12 +168,18 @@ impl App {
     pub fn is_busy(&self) -> bool {
         match &self.screen {
             Screen::Loading => true,
-            Screen::Loaded(loaded) => {
-                loaded.code.is_computing()
-                    || loaded.churn.is_computing()
-                    || loaded.status.is_computing()
-            }
+            Screen::Loaded(loaded) => loaded.any_computing(),
+            Screen::Reader(reader) => reader.loaded.any_computing(),
             Screen::Error(_) => false,
+        }
+    }
+
+    /// The interactive tree state, whether shown directly or behind the reader.
+    fn loaded_mut(&mut self) -> Option<&mut Loaded> {
+        match &mut self.screen {
+            Screen::Loaded(loaded) => Some(loaded),
+            Screen::Reader(reader) => Some(&mut reader.loaded),
+            _ => None,
         }
     }
 
@@ -206,7 +207,7 @@ impl App {
     /// tree is rebuilt (preserving expansion and selection by path) and the
     /// cached metric layers are invalidated, with the active lens re-requested.
     pub fn on_rescan(&mut self, outcome: ScanOutcome) {
-        let Screen::Loaded(loaded) = &mut self.screen else {
+        let Some(loaded) = self.loaded_mut() else {
             // Still loading: treat this as the initial scan.
             self.on_scan(outcome);
             return;
@@ -228,7 +229,7 @@ impl App {
 
     /// Apply a freshly-computed lens layer (from a background collector).
     pub fn on_layer(&mut self, result: LayerResult) {
-        if let Screen::Loaded(loaded) = &mut self.screen {
+        if let Some(loaded) = self.loaded_mut() {
             loaded.apply_layer(result);
         }
     }
@@ -239,6 +240,14 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+
+        // The full-screen reader owns all input while it is open.
+        if let Screen::Reader(reader) = &mut self.screen {
+            if matches!(reader.handle_key(key), ReaderExit::ToTree) {
+                self.close_reader();
+            }
             return;
         }
 
@@ -435,8 +444,8 @@ impl App {
         }
     }
 
-    /// Enter on the selection: expand/descend a directory, or queue the selected
-    /// file to view in the user's pager.
+    /// Enter on the selection: expand/descend a directory, or open the selected
+    /// file in the full-screen reader.
     fn open_selected(&mut self) {
         let Screen::Loaded(loaded) = &mut self.screen else {
             return;
@@ -449,14 +458,40 @@ impl App {
             return;
         }
         let rel_path = loaded.tree.nodes[id].rel_path.clone();
-        self.pending_open = Some((self.root.join(rel_path), OpenMode::View));
+        self.open_reader(self.root.join(rel_path));
+    }
+
+    /// Replace the loaded tree with a full-screen reader over `path`, moving the
+    /// boxed tree state into the reader so exiting restores it whole.
+    fn open_reader(&mut self, path: PathBuf) {
+        let Screen::Loaded(loaded) = std::mem::replace(&mut self.screen, Screen::Loading) else {
+            return; // unreachable: only called from the loaded screen
+        };
+        let reader = Reader::open(loaded, path, self.picker.as_ref());
+        self.screen = Screen::Reader(Box::new(reader));
+    }
+
+    /// Close the reader, restoring the tree it was holding.
+    fn close_reader(&mut self) {
+        if let Screen::Reader(reader) = std::mem::replace(&mut self.screen, Screen::Loading) {
+            self.screen = Screen::Loaded(reader.loaded);
+        }
+    }
+
+    /// Take a pending external handoff (`$EDITOR`/`$PAGER`) requested from inside
+    /// the reader, for the event loop to run while the TUI is suspended.
+    pub fn take_reader_handoff(&mut self) -> Option<Handoff> {
+        match &mut self.screen {
+            Screen::Reader(reader) => reader.pending_handoff.take(),
+            _ => None,
+        }
     }
 
     /// Shift+Enter / `e` on the selection: queue the selected file to edit in the
     /// user's editor. A no-op on directories.
     fn edit_selected(&mut self) {
         if let Some(path) = self.selected_file_path() {
-            self.pending_open = Some((path, OpenMode::Edit));
+            self.pending_edit = Some(path);
         }
     }
 
@@ -587,6 +622,11 @@ impl Loaded {
     /// The status layer entry for a node, if the status layer is computed.
     pub fn status_at(&self, id: NodeId) -> Option<&StatusData> {
         self.status.ready().map(|values| &values[id])
+    }
+
+    /// Whether any lens layer is still being computed (keeps the spinner alive).
+    pub fn any_computing(&self) -> bool {
+        self.code.is_computing() || self.churn.is_computing() || self.status.is_computing()
     }
 
     /// Whether the active lens's layer is still being computed.
@@ -1085,14 +1125,35 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_file_queues_it_for_viewing() {
+    fn enter_on_a_file_opens_the_reader() {
         let mut app = sample_app();
         select(&mut app, "README.md");
         app.update(Action::Open);
-        assert_eq!(
-            app.pending_open,
-            Some((PathBuf::from("/proj/README.md"), OpenMode::View))
-        );
+        assert!(app.pending_edit.is_none(), "should not shell out to $PAGER");
+        match &app.screen {
+            Screen::Reader(reader) => {
+                assert_eq!(reader.path, PathBuf::from("/proj/README.md"));
+            }
+            _ => panic!("expected the reader screen"),
+        }
+    }
+
+    #[test]
+    fn closing_the_reader_restores_the_tree() {
+        let mut app = sample_app();
+        // Expand `src` so the restored tree must remember the expansion.
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        assert!(is_visible(&app, "main.rs"));
+
+        select(&mut app, "README.md");
+        app.update(Action::Open);
+        assert!(matches!(app.screen, Screen::Reader(_)));
+
+        // `q` in the reader returns to the tree with state intact.
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.screen, Screen::Loaded(_)));
+        assert!(is_visible(&app, "main.rs"), "expansion should be preserved");
     }
 
     #[test]
@@ -1100,10 +1161,7 @@ mod tests {
         let mut app = sample_app();
         select(&mut app, "README.md");
         app.update(Action::Edit);
-        assert_eq!(
-            app.pending_open,
-            Some((PathBuf::from("/proj/README.md"), OpenMode::Edit))
-        );
+        assert_eq!(app.pending_edit, Some(PathBuf::from("/proj/README.md")));
     }
 
     #[test]
@@ -1111,18 +1169,18 @@ mod tests {
         let mut app = sample_app();
         select(&mut app, "src");
         app.update(Action::Edit);
-        assert!(app.pending_open.is_none());
+        assert!(app.pending_edit.is_none());
         // Unlike Enter, editing a directory does not expand it.
         assert!(!is_visible(&app, "main.rs"));
     }
 
     #[test]
-    fn enter_on_a_directory_expands_without_queuing() {
+    fn enter_on_a_directory_expands_without_opening_the_reader() {
         let mut app = sample_app();
         assert!(!is_visible(&app, "main.rs"));
         select(&mut app, "src");
         app.update(Action::Open);
-        assert!(app.pending_open.is_none());
+        assert!(matches!(app.screen, Screen::Loaded(_)));
         assert!(is_visible(&app, "main.rs"));
     }
 
