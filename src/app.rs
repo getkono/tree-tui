@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::layout::Rect;
-use ratatui::widgets::TableState;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::widgets::{Row, TableState};
 use ratatui_image::picker::Picker;
 
 use crate::action::{self, Action};
@@ -59,6 +59,22 @@ fn contains(r: Rect, col: u16, row: u16) -> bool {
         && col < r.x.saturating_add(r.width)
         && row >= r.y
         && row < r.y.saturating_add(r.height)
+}
+
+/// Cached, fully-built tree-table render inputs (rows + resolved columns) for a
+/// given content revision, width, and computing state. Reused on pure
+/// navigation frames: selection and scroll changes don't alter row *content*
+/// (ratatui applies the row highlight from `table_state` at render time), so the
+/// rows are rebuilt only when content changes (`rebuild_rev`), the pane is
+/// resized (`width`), or the active lens's computing state flips (the `…`
+/// placeholder). Built and populated by `ui::tree_view::render`.
+pub struct RowCache {
+    pub(crate) rows: Vec<Row<'static>>,
+    pub(crate) header: Row<'static>,
+    pub(crate) widths: Vec<Constraint>,
+    pub(crate) width: u16,
+    pub(crate) rev: u64,
+    pub(crate) computing: bool,
 }
 
 /// Which screen the app is currently showing.
@@ -115,6 +131,12 @@ pub struct Loaded {
     pub sort_dir: SortDir,
     /// Whether the (computed) code layer reported a parsing ambiguity.
     pub inaccurate: bool,
+    /// Bumped on every content rebuild; part of the row-cache key so navigation
+    /// frames reuse the built rows but any content change rebuilds them.
+    pub rebuild_rev: u64,
+    /// Cached tree-table render inputs reused across navigation frames; see
+    /// [`RowCache`].
+    pub row_cache: Option<RowCache>,
     // Lazily-computed, cached per-lens metric layers.
     pub code: Layer<CodeData>,
     pub churn: Layer<ChurnData>,
@@ -385,37 +407,53 @@ impl App {
     }
 
     /// A wheel scroll at a screen position. The wheel acts on the pane under the
-    /// cursor and focuses it (interact-to-focus). The step is a small fixed
-    /// amount per notch: `delta` carries only direction, because terminals emit
-    /// several wheel events per physical notch (and a fast spin lands in one
-    /// coalesced burst), so its magnitude is not a reliable distance.
+    /// cursor and focuses it (interact-to-focus). `delta` is signed steps
+    /// (positive = down); the event loop passes ±1 per wheel event, moving 1
+    /// tree row / 3 preview lines per notch. Every target clamps, so a scroll
+    /// can't run off the edge.
     pub fn handle_scroll(&mut self, col: u16, row: u16, delta: i32) {
-        let dir = delta.signum();
         match &mut self.screen {
             Screen::Loaded(loaded) => match loaded.panes.hit(col, row) {
                 Some(Focus::Preview) => {
                     loaded.focus = Focus::Preview;
-                    loaded.preview_view.scroll_by(dir * WHEEL_PREVIEW_LINES);
+                    loaded.preview_view.scroll_by(delta * WHEEL_PREVIEW_LINES);
                 }
                 Some(Focus::Tree) => {
                     loaded.focus = Focus::Tree;
-                    loaded.move_by(dir as i64 * WHEEL_TREE_ROWS);
+                    loaded.move_by(delta as i64 * WHEEL_TREE_ROWS);
                 }
                 None => {}
             },
             // The full-screen reader scrolls its view with the wheel too.
-            Screen::Reader(reader) => reader.scroll(dir * WHEEL_PREVIEW_LINES),
+            Screen::Reader(reader) => reader.scroll(delta * WHEEL_PREVIEW_LINES),
             _ => {}
         }
     }
 
     /// A left click focuses the pane under the cursor (interact-to-focus). An
-    /// idle hover never changes focus — only deliberate interaction does.
+    /// idle hover never changes focus — only deliberate interaction does. In the
+    /// tree it also moves the selection to the clicked row; clicking the
+    /// already-selected row activates it (like Enter: expand/descend a dir, open
+    /// a file). A click on the border, header, or blank rows only focuses.
     pub fn handle_click(&mut self, col: u16, row: u16) {
+        let mut activate = false;
         if let Screen::Loaded(loaded) = &mut self.screen
             && let Some(focus) = loaded.panes.hit(col, row)
         {
             loaded.focus = focus;
+            if focus == Focus::Tree
+                && let Some(index) = loaded.row_at(row)
+            {
+                if loaded.table_state.selected() == Some(index) {
+                    activate = true;
+                } else {
+                    loaded.move_to(index);
+                }
+            }
+        }
+        // The `loaded` borrow above has ended; activation re-borrows `self`.
+        if activate {
+            self.open_selected();
         }
     }
 
@@ -582,6 +620,8 @@ impl Loaded {
             sort_key: Lens::Code.default_sub_key(),
             sort_dir: SortDir::Desc,
             inaccurate: false,
+            rebuild_rev: 0,
+            row_cache: None,
             code: Layer::NotComputed,
             churn: Layer::NotComputed,
             status: Layer::NotComputed,
@@ -806,6 +846,9 @@ impl Loaded {
     /// Recompute the visible list (honoring filter + declutter), keeping the
     /// selection on the same node when possible.
     fn rebuild(&mut self) {
+        // Content is changing: invalidate the cached table rows (the renderer
+        // keys its row cache on this counter).
+        self.rebuild_rev = self.rebuild_rev.wrapping_add(1);
         let previous_id = self.selected_id();
         let previous_index = self.table_state.selected();
         let mut visible = if self.filter.is_empty() {
@@ -897,6 +940,23 @@ impl Loaded {
         }
         self.table_state
             .select(Some(index.min(self.visible.len() - 1)));
+    }
+
+    /// Map a screen `row` to a visible-list index, or `None` if it lands on the
+    /// border/header/blank rows. Data rows begin at `panes.tree.y + 2` (the top
+    /// border + the header) and span `viewport_rows`; the scroll offset comes
+    /// from ratatui's `table_state` (read-only — the table still owns scroll).
+    fn row_at(&self, row: u16) -> Option<usize> {
+        let first = self.panes.tree.y.saturating_add(2);
+        if row < first {
+            return None; // border or header
+        }
+        let in_view = (row - first) as usize;
+        if in_view >= self.viewport_rows {
+            return None; // below the last drawn data row
+        }
+        let index = self.table_state.offset() + in_view;
+        (index < self.visible.len()).then_some(index)
     }
 
     fn expand_or_descend(&mut self) {
@@ -1060,6 +1120,14 @@ mod tests {
         }
     }
 
+    /// Set the visible-rows count the renderer normally records each frame, so
+    /// `row_at` accepts clicks below the first data row in unit tests.
+    fn set_viewport(app: &mut App, rows: usize) {
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.viewport_rows = rows;
+        }
+    }
+
     fn focus(app: &App) -> Focus {
         let Screen::Loaded(loaded) = &app.screen else {
             panic!("not loaded");
@@ -1072,6 +1140,13 @@ mod tests {
             panic!("not loaded");
         };
         loaded.table_state.selected().unwrap()
+    }
+
+    fn rebuild_rev(app: &App) -> u64 {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.rebuild_rev
     }
 
     #[test]
@@ -1101,20 +1176,134 @@ mod tests {
     }
 
     #[test]
-    fn wheel_moves_one_step_per_notch_and_focuses_the_pane() {
+    fn click_selects_the_clicked_tree_row() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "src");
+        app.update(Action::Expand); // ≥3 visible rows
+        app.update(Action::First); // selection (and offset) at the top
+        // Data rows start at screen row 2 (top border + header); the third data
+        // row is screen row 4 → visible index 2.
+        app.handle_click(5, 4);
+        assert_eq!(selected_index(&app), 2);
+        assert_eq!(focus(&app), Focus::Tree);
+    }
+
+    #[test]
+    fn click_on_the_header_or_border_only_focuses() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        app.update(Action::First);
+        let before = selected_index(&app);
+        app.handle_click(5, 0); // top border
+        assert_eq!(focus(&app), Focus::Tree);
+        assert_eq!(selected_index(&app), before);
+        app.handle_click(5, 1); // header row
+        assert_eq!(selected_index(&app), before);
+    }
+
+    #[test]
+    fn clicking_the_selected_directory_row_activates_it() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "src");
+        assert!(!is_visible(&app, "main.rs"));
+        // Clicking the already-selected row activates it (like Enter) → expands.
+        let row = 2 + selected_index(&app) as u16;
+        app.handle_click(5, row);
+        assert!(is_visible(&app, "main.rs"));
+    }
+
+    #[test]
+    fn clicking_the_selected_file_row_opens_the_reader() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "README.md");
+        // Clicking the already-selected file row activates it → opens the reader.
+        let row = 2 + selected_index(&app) as u16;
+        app.handle_click(5, row);
+        assert!(matches!(app.screen, Screen::Reader(_)));
+    }
+
+    #[test]
+    fn content_changes_bump_the_rebuild_rev_but_navigation_does_not() {
+        let mut app = sample_app();
+        select(&mut app, "src");
+        let base = rebuild_rev(&app);
+
+        // Plain navigation never rebuilds content, so the rev is stable (the
+        // renderer reuses its cached rows on these frames).
+        app.update(Action::Down);
+        app.update(Action::Up);
+        assert_eq!(rebuild_rev(&app), base, "navigation must not bump the rev");
+
+        // Expansion, sorting, and filtering each change content → rebuild.
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        let after_expand = rebuild_rev(&app);
+        assert!(after_expand > base, "expansion should bump the rev");
+        app.update(Action::CycleSort);
+        let after_sort = rebuild_rev(&app);
+        assert!(after_sort > after_expand, "sorting should bump the rev");
+        app.set_filter("rs".into());
+        assert!(
+            rebuild_rev(&app) > after_sort,
+            "filtering should bump the rev"
+        );
+    }
+
+    #[test]
+    fn clicking_a_new_tree_row_selects_without_activating() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "src");
+        // Click README.md's row (a different, not-yet-selected row): it selects
+        // but does not activate, so the reader never opens.
+        let readme = {
+            let Screen::Loaded(loaded) = &app.screen else {
+                panic!("not loaded");
+            };
+            loaded
+                .visible
+                .iter()
+                .position(|&id| loaded.tree.nodes[id].name == "README.md")
+                .unwrap()
+        };
+        app.handle_click(5, 2 + readme as u16);
+        assert!(matches!(app.screen, Screen::Loaded(_)));
+        assert_eq!(selected_index(&app), readme);
+    }
+
+    #[test]
+    fn wheel_moves_by_notch_count_and_focuses_the_pane() {
         let mut app = sample_app();
         set_panes(&mut app);
         select(&mut app, "src");
-        app.update(Action::Expand); // reveal main.rs so there is room to move
-        select(&mut app, "src");
-        let before = selected_index(&app);
+        app.update(Action::Expand); // reveal main.rs / app.rs so there is room
+        app.update(Action::First); // start at the top
+        let top = selected_index(&app);
 
-        // Over the tree, one notch moves exactly one row — and a fat raw delta
-        // (terminals emit several events per notch) still moves only one row,
-        // not ten. The wheel also focuses the pane it acts on.
-        app.handle_scroll(5, 5, 5);
-        assert_eq!(selected_index(&app), before + 1);
+        // Over the tree, the wheel moves by the coalesced notch count: a spin of
+        // N notches moves N rows, and focuses the pane it acts on.
+        app.handle_scroll(5, 5, 2);
+        assert_eq!(selected_index(&app), top + 2);
         assert_eq!(focus(&app), Focus::Tree);
+
+        // A big spin clamps to the last row rather than running off the end.
+        app.update(Action::Last);
+        let last = selected_index(&app);
+        app.update(Action::First);
+        app.handle_scroll(5, 5, 99);
+        assert_eq!(selected_index(&app), last);
+
+        // Scrolling up by a big spin clamps back to the top.
+        app.handle_scroll(5, 5, -99);
+        assert_eq!(selected_index(&app), top);
 
         // Over the preview, the wheel scrolls the preview view (not the tree
         // selection) and focuses the preview.

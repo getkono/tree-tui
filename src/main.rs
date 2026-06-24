@@ -7,7 +7,6 @@
 
 mod action;
 mod app;
-mod batch;
 mod cli;
 mod clipboard;
 mod collect;
@@ -77,10 +76,14 @@ async fn run(dir: PathBuf) -> color_eyre::Result<()> {
     tracing::info!(target = %root.display(), "tree starting");
 
     let mut app = App::new(root, label);
-    // Probe the terminal's image capabilities for the preview pane before we
-    // take over the screen. Best-effort: on a non-tty or unsupported terminal
-    // this is `None` and image previews fall back to a placeholder.
-    app.picker = ratatui_image::picker::Picker::from_query_stdio().ok();
+    // Image picker for the preview pane. We deliberately do NOT use
+    // `Picker::from_query_stdio()`: it probes the terminal by writing queries and
+    // reading the replies straight from stdin at startup, which collides with
+    // crossterm's event reader and leaves the whole TUI unable to receive any
+    // key or mouse input. `halfblocks()` detects tmux/protocol from env vars
+    // only (no stdin), so input always works; images render as Unicode
+    // half-blocks, which any truecolor terminal supports.
+    app.picker = Some(ratatui_image::picker::Picker::halfblocks());
     let mut terminal = tui::init()?;
     let result = event::run(&mut terminal, &mut app).await;
     tui::restore();

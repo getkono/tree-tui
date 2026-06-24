@@ -252,6 +252,46 @@ mod tests {
     }
 
     #[test]
+    fn navigation_reuses_the_row_cache_but_content_changes_rebuild_it() {
+        use crate::action::Action;
+        let mut app = sample_app();
+        let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let rev = |app: &App| {
+            let Screen::Loaded(l) = &app.screen else {
+                panic!("not loaded");
+            };
+            l.rebuild_rev
+        };
+        let first = rev(&app);
+
+        // The render populated a cache keyed to the current content, width, and
+        // computing state.
+        if let Screen::Loaded(l) = &app.screen {
+            let c = l.row_cache.as_ref().expect("render populates the cache");
+            assert_eq!(c.rev, first);
+            assert_eq!(c.width, 96);
+            assert_eq!(c.computing, l.active_computing());
+        }
+
+        // Pure navigation doesn't change content, so the rev is stable and the
+        // next render reuses the cache.
+        app.update(Action::Down);
+        assert_eq!(rev(&app), first, "navigation must not rebuild content");
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        // A content change bumps the rev; the next render rebuilds to match.
+        app.update(Action::CycleSort);
+        let after = rev(&app);
+        assert!(after > first, "sorting changes content");
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        if let Screen::Loaded(l) = &app.screen {
+            assert_eq!(l.row_cache.as_ref().unwrap().rev, after);
+        }
+    }
+
+    #[test]
     fn renders_a_sole_subdir_chain_as_one_concatenated_row() {
         // `src/main/java` is a chain of sole sub-directories: it must render as a
         // single concatenated row, never as separate `main` / `java` rows.

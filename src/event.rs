@@ -2,13 +2,12 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::EventStream;
-use futures::{FutureExt, StreamExt};
+use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
+use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::app::{App, Screen};
-use crate::batch::{self, Effect};
 use crate::collect::{self, LayerResult};
 use crate::scan::ScanOutcome;
 use crate::ui::reader::Handoff;
@@ -48,43 +47,13 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
     while !app.should_quit {
         let mut redraw = false;
         tokio::select! {
-            maybe_event = events.next() => {
-                // Handle the first event, then drain everything else that is
-                // immediately ready into one burst. Coalescing collapses wheel
-                // runs so a flood becomes a single net change and a single
-                // redraw (issue #22), and drops bare motion entirely — so idly
-                // moving the mouse produces no effects and no redraw.
-                let first = match maybe_event {
-                    Some(Ok(ev)) => ev,
-                    Some(Err(err)) => return Err(err.into()),
-                    None => {
-                        app.should_quit = true;
-                        continue;
-                    }
-                };
-                let mut burst = vec![first];
-                while burst.len() < batch::MAX_BATCH {
-                    match events.next().now_or_never() {
-                        Some(Some(Ok(ev))) => burst.push(ev),
-                        Some(Some(Err(err))) => return Err(err.into()),
-                        Some(None) => {
-                            app.should_quit = true;
-                            break;
-                        }
-                        // Nothing more is ready right now: stop draining.
-                        None => break,
-                    }
-                }
-                let effects = batch::coalesce(burst);
-                // Only repaint when the burst carried real work; a burst of
-                // nothing but dropped motion/release events changes nothing.
-                redraw = !effects.is_empty();
-                for effect in effects {
-                    apply_effect(terminal, app, effect)?;
-                    if app.should_quit {
-                        break;
-                    }
-                }
+            // One terminal event per iteration — the standard crossterm/ratatui
+            // pattern. `apply_event` reports whether anything changed on screen,
+            // so idle events (mouse motion is not even tracked) cost no redraw.
+            maybe_event = events.next() => match maybe_event {
+                Some(Ok(event)) => redraw = apply_event(terminal, app, event)?,
+                Some(Err(err)) => return Err(err.into()),
+                None => app.should_quit = true,
             },
             result = &mut scan_rx, if matches!(app.screen, Screen::Loading) => {
                 match result {
@@ -163,26 +132,44 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
     Ok(())
 }
 
-/// Apply one coalesced [`Effect`] to the app, handling any external handoff it
-/// triggers. The caller redraws once after the whole batch.
-fn apply_effect(
+/// Apply one terminal event to the app, handling any external handoff a key
+/// triggers. Returns whether the screen needs repainting — events the UI
+/// ignores (key releases, bare mouse buttons, focus/paste) change nothing.
+fn apply_event(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    effect: Effect,
-) -> color_eyre::Result<()> {
-    match effect {
-        Effect::Key(key) => {
+    event: Event,
+) -> color_eyre::Result<bool> {
+    let redraw = match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             app.handle_key(key);
             drain_pending_edit(terminal, app)?;
             drain_reader_handoff(terminal, app)?;
             drain_pending_capture(app);
+            true
         }
-        Effect::Scroll { col, row, delta } => app.handle_scroll(col, row, delta),
-        Effect::Click { col, row } => app.handle_click(col, row),
-        // The resize itself needs nothing; the caller's redraw repaints.
-        Effect::Resize => {}
-    }
-    Ok(())
+        // Wheel scrolls and a left click act on the pane under the cursor; one
+        // step per event. Motion is not tracked, so nothing floods the loop.
+        Event::Mouse(m) => match m.kind {
+            MouseEventKind::ScrollDown => {
+                app.handle_scroll(m.column, m.row, 1);
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                app.handle_scroll(m.column, m.row, -1);
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                app.handle_click(m.column, m.row);
+                true
+            }
+            _ => false,
+        },
+        Event::Resize(_, _) => true,
+        // Key releases, focus changes, paste: nothing to repaint for.
+        _ => false,
+    };
+    Ok(redraw)
 }
 
 /// Apply a queued mouse-capture flip from the release-capture toggle.

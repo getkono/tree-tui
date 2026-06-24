@@ -46,14 +46,22 @@ pub fn restore() {
 /// and by the release-capture toggle so the user can fall back to the
 /// terminal's native text selection.
 pub fn set_mouse_capture(on: bool) -> std::io::Result<()> {
-    use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
-    use crossterm::execute;
+    use std::io::Write;
 
+    // Enable only button + wheel reporting (mode 1000) with SGR coordinates
+    // (1006). We deliberately skip motion tracking (1002 drag, 1003 any-motion):
+    // the UI is interact-to-focus, so hover/drag events are useless, and
+    // any-motion tracking streams an event for every pixel of mouse movement —
+    // that flood is what made the TUI feel unresponsive. crossterm's
+    // `EnableMouseCapture` turns 1002/1003 on, so we write the modes we want
+    // directly instead.
+    let mut out = std::io::stdout();
     if on {
-        execute!(std::io::stdout(), EnableMouseCapture)?;
+        out.write_all(b"\x1b[?1000h\x1b[?1006h")?;
     } else {
-        execute!(std::io::stdout(), DisableMouseCapture)?;
+        out.write_all(b"\x1b[?1006l\x1b[?1000l")?;
     }
+    out.flush()?;
     MOUSE_CAPTURED.store(on, Ordering::Relaxed);
     Ok(())
 }
