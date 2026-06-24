@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/getkono/tree-tui/compare/v0.1.1...v0.1.2) - 2026-06-24
+
+### Added
+
+- open files in a full-screen in-TUI reader instead of $PAGER
+- focusable, scrollable preview pane with focus-follows-mouse
+- watch the filesystem and refresh on change
+- view files in $PAGER on Enter, edit on Shift+Enter
+
+### Fixed
+
+- smooth navigation, granular wheel, and interact-to-focus
+
+### Other
+
+- Merge pull request #8 from getkono/dependabot/cargo/gix-0.85.0
+- cache tree rows and add interactive click selection
+- batch and coalesce input events for smooth scrolling
+- Merge branch 'master' into feat/file-watching
+
 ## [0.1.1](https://github.com/getkono/tree-tui/compare/v0.1.0...v0.1.1) - 2026-06-23
 
 ### Added
