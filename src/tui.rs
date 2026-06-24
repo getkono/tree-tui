@@ -5,6 +5,11 @@
 //! That ordering means a panic restores the terminal first, then color-eyre
 //! prints its report to a clean screen. Every successful [`init`] must be
 //! paired with a [`restore`] on the way out.
+//!
+//! Mouse capture is enabled so the UI can wheel-scroll panes and focus the pane
+//! you scroll or click. The tradeoff: while capture is on, the terminal's native
+//! click-drag text selection is intercepted — use the in-app yank (OSC 52) or
+//! the release-capture toggle ([`set_mouse_capture`]) to copy with the mouse.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -14,20 +19,56 @@ use ratatui::DefaultTerminal;
 /// be popped on teardown / suspension). Set once in [`init`].
 static KEYBOARD_ENHANCED: AtomicBool = AtomicBool::new(false);
 
+/// Whether mouse capture is currently on (so we know to disable it on teardown /
+/// suspension and to report the state to the release-capture toggle).
+static MOUSE_CAPTURED: AtomicBool = AtomicBool::new(false);
+
 /// Enter the alternate screen + raw mode, returning the terminal.
 ///
 /// Also asks the terminal — when it supports the kitty keyboard protocol — to
-/// disambiguate key events, so `Shift+Enter` arrives distinct from `Enter`.
+/// disambiguate key events, so `Shift+Enter` arrives distinct from `Enter`, and
+/// enables mouse capture for wheel scrolling and click-to-focus.
 pub fn init() -> std::io::Result<DefaultTerminal> {
     let terminal = ratatui::try_init()?;
     push_keyboard_enhancement();
+    let _ = set_mouse_capture(true);
     Ok(terminal)
 }
 
 /// Leave raw mode + the alternate screen.
 pub fn restore() {
+    let _ = set_mouse_capture(false);
     pop_keyboard_enhancement();
     ratatui::restore();
+}
+
+/// Turn mouse capture on or off, recording the state. Used at startup/teardown
+/// and by the release-capture toggle so the user can fall back to the
+/// terminal's native text selection.
+pub fn set_mouse_capture(on: bool) -> std::io::Result<()> {
+    use std::io::Write;
+
+    // Enable only button + wheel reporting (mode 1000) with SGR coordinates
+    // (1006). We deliberately skip motion tracking (1002 drag, 1003 any-motion):
+    // the UI is interact-to-focus, so hover/drag events are useless, and
+    // any-motion tracking streams an event for every pixel of mouse movement —
+    // that flood is what made the TUI feel unresponsive. crossterm's
+    // `EnableMouseCapture` turns 1002/1003 on, so we write the modes we want
+    // directly instead.
+    let mut out = std::io::stdout();
+    if on {
+        out.write_all(b"\x1b[?1000h\x1b[?1006h")?;
+    } else {
+        out.write_all(b"\x1b[?1006l\x1b[?1000l")?;
+    }
+    out.flush()?;
+    MOUSE_CAPTURED.store(on, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Whether mouse capture is currently on.
+pub fn mouse_captured() -> bool {
+    MOUSE_CAPTURED.load(Ordering::Relaxed)
 }
 
 /// Run `f` with the terminal handed back to the OS (cooked mode, normal
@@ -47,12 +88,21 @@ pub fn suspended<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> st
     };
 
     pop_keyboard_enhancement();
+    // Hand the mouse back so the external program (and its native selection)
+    // behaves normally; re-grab on return only if we had it.
+    let had_mouse = mouse_captured();
+    if had_mouse {
+        let _ = set_mouse_capture(false);
+    }
     disable_raw_mode()?;
     execute!(std::io::stdout(), LeaveAlternateScreen)?;
     let result = f();
     enable_raw_mode()?;
     execute!(std::io::stdout(), EnterAlternateScreen)?;
     repush_keyboard_enhancement();
+    if had_mouse {
+        let _ = set_mouse_capture(true);
+    }
     terminal.clear()?; // resync ratatui's buffer with the freshly cleared screen
     Ok(result)
 }

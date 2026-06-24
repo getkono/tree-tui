@@ -16,8 +16,8 @@ use ratatui_image::StatefulImage;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
-use super::{syntax, theme};
-use crate::app::Loaded;
+use super::{codeview, syntax, theme};
+use crate::app::{Focus, Loaded};
 
 /// Largest file we read for a text preview.
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
@@ -50,27 +50,38 @@ pub fn load(path: &Path, picker: Option<&Picker>) -> Preview {
 }
 
 fn load_image(path: &Path, picker: Option<&Picker>) -> Preview {
+    match decode_image(path, picker) {
+        Ok(protocol) => Preview::Image(protocol),
+        Err(message) => Preview::Info(message),
+    }
+}
+
+/// Decode `path` into a resize protocol for inline display, or an explanatory
+/// message. Shared by the preview pane and the full-screen reader.
+pub(super) fn decode_image(
+    path: &Path,
+    picker: Option<&Picker>,
+) -> Result<Box<StatefulProtocol>, String> {
     let Some(picker) = picker else {
-        return Preview::Info("image preview is not supported by this terminal".into());
+        return Err("image preview is not supported by this terminal".into());
     };
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() > MAX_IMAGE_BYTES => {
-            return Preview::Info(format!(
+            return Err(format!(
                 "image too large to preview ({})",
                 theme::human_bytes(meta.len())
             ));
         }
         Ok(_) => {}
-        Err(err) => return Preview::Info(format!("cannot read image: {err}")),
+        Err(err) => return Err(format!("cannot read image: {err}")),
     }
-    let reader = match image::ImageReader::open(path).and_then(|r| r.with_guessed_format()) {
-        Ok(reader) => reader,
-        Err(err) => return Preview::Info(format!("cannot read image: {err}")),
-    };
-    match reader.decode() {
-        Ok(img) => Preview::Image(Box::new(picker.new_resize_protocol(img))),
-        Err(err) => Preview::Info(format!("cannot decode image: {err}")),
-    }
+    let reader = image::ImageReader::open(path)
+        .and_then(|r| r.with_guessed_format())
+        .map_err(|err| format!("cannot read image: {err}"))?;
+    let img = reader
+        .decode()
+        .map_err(|err| format!("cannot decode image: {err}"))?;
+    Ok(Box::new(picker.new_resize_protocol(img)))
 }
 
 fn load_text(path: &Path) -> Preview {
@@ -102,20 +113,24 @@ fn load_text(path: &Path) -> Preview {
 
 /// Render the preview pane for the current selection into `area`.
 pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
+    let focused = loaded.focus == Focus::Preview;
+
+    // Text scrolls through the shared code-view, which owns its own border.
+    if matches!(loaded.preview, Preview::Text(_)) {
+        codeview::render(frame, &mut loaded.preview_view, area, " preview ", focused);
+        return;
+    }
+
+    let border = if focused { theme::ACCENT } else { theme::MUTED };
     let block = Block::bordered()
         .title(" preview ")
-        .border_style(Style::default().fg(theme::MUTED))
+        .border_style(Style::default().fg(border))
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     match &mut loaded.preview {
-        Preview::Empty => {}
-        Preview::Text(lines) => {
-            // Clip to the visible height to avoid cloning the whole prefix.
-            let rows: Vec<Line> = lines.iter().take(inner.height as usize).cloned().collect();
-            frame.render_widget(Paragraph::new(rows), inner);
-        }
+        Preview::Empty | Preview::Text(_) => {}
         Preview::Image(protocol) => {
             frame.render_stateful_widget(
                 StatefulImage::<StatefulProtocol>::new(),

@@ -19,7 +19,7 @@ use tokei::LanguageType;
 use unicode_width::UnicodeWidthStr;
 
 use super::theme;
-use crate::app::Loaded;
+use crate::app::{Focus, Loaded, RowCache};
 use crate::model::{CodeNum, ColumnSpec, Lens, NodeId, NodeKind, SubKey, TreeNode};
 
 /// Width of every numeric column (fits `comments`, `modified`, and grouped
@@ -149,36 +149,65 @@ pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
     // Visible tree rows = body height minus borders (2) and the header row (1).
     loaded.viewport_rows = area.height.saturating_sub(3) as usize;
 
-    // Inner width available to columns: minus borders (2) and the 2-cell
-    // selection gutter.
-    let inner = area.width.saturating_sub(4) as usize;
-    let lens = loaded.active_lens;
+    // Build the rows (and resolved columns) only when the content, width, or
+    // computing state changed; otherwise reuse the cache. Pure navigation
+    // (selection/scroll) doesn't alter row content — ratatui re-applies the
+    // highlight from `table_state` at render — so this keeps held-key and wheel
+    // scrolling instant regardless of how many rows are expanded.
+    let rev = loaded.rebuild_rev;
+    let computing = loaded.active_computing();
+    let width = area.width;
+    let fresh = matches!(
+        &loaded.row_cache,
+        Some(c) if c.width == width && c.rev == rev && c.computing == computing
+    );
 
-    let mut name_needed = 0;
-    let mut desired_legend = 0;
-    for &id in &loaded.visible {
-        let node = &loaded.tree.nodes[id];
-        let primary_lang = loaded.code_at(id).and_then(|c| c.primary_lang);
-        let name = loaded.display_name(id);
-        let indent = loaded.display_depth(id);
-        name_needed = name_needed.max(spans_width(&name_spans(node, &name, indent, primary_lang)));
-        if matches!(lens, Lens::Code)
-            && let Some(code) = loaded.code_at(id)
-        {
-            desired_legend =
-                desired_legend.max(desired_legend_width(&code.langs, code.num.lines()));
+    if !fresh {
+        // Inner width available to columns: minus borders (2) and the 2-cell
+        // selection gutter.
+        let inner = width.saturating_sub(4) as usize;
+        let lens = loaded.active_lens;
+
+        let mut name_needed = 0;
+        let mut desired_legend = 0;
+        for &id in &loaded.visible {
+            let node = &loaded.tree.nodes[id];
+            let primary_lang = loaded.code_at(id).and_then(|c| c.primary_lang);
+            let name = loaded.display_name(id);
+            let indent = loaded.display_depth(id);
+            name_needed =
+                name_needed.max(spans_width(&name_spans(node, &name, indent, primary_lang)));
+            if matches!(lens, Lens::Code)
+                && let Some(code) = loaded.code_at(id)
+            {
+                desired_legend =
+                    desired_legend.max(desired_legend_width(&code.langs, code.num.lines()));
+            }
         }
+
+        let columns = Columns::choose(inner, name_needed, desired_legend, lens);
+        let rows: Vec<Row> = loaded
+            .visible
+            .iter()
+            .map(|&id| columns.row(loaded, id))
+            .collect();
+        loaded.row_cache = Some(RowCache {
+            rows,
+            header: columns.header(),
+            widths: columns.widths(),
+            width,
+            rev,
+            computing,
+        });
     }
 
-    let columns = Columns::choose(inner, name_needed, desired_legend, lens);
-    let rows: Vec<Row> = loaded
-        .visible
-        .iter()
-        .map(|&id| columns.row(loaded, id))
-        .collect();
-
-    let table = Table::new(rows, columns.widths())
-        .header(columns.header())
+    let focused = loaded.focus == Focus::Tree;
+    let cache = loaded
+        .row_cache
+        .as_ref()
+        .expect("row_cache populated above");
+    let table = Table::new(cache.rows.clone(), cache.widths.clone())
+        .header(cache.header.clone())
         .column_spacing(1)
         .row_highlight_style(
             Style::default()
@@ -188,7 +217,11 @@ pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
         .highlight_symbol("▌ ")
         .block(
             Block::bordered()
-                .border_style(Style::default().fg(theme::MUTED))
+                .border_style(Style::default().fg(if focused {
+                    theme::ACCENT
+                } else {
+                    theme::MUTED
+                }))
                 .title(" tree "),
         );
 

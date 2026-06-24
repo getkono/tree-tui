@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::widgets::TableState;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::widgets::{Row, TableState};
 use ratatui_image::picker::Picker;
 
 use crate::action::{self, Action};
@@ -14,13 +15,75 @@ use crate::model::{
     self, ChurnData, CodeData, Layer, Lens, NodeId, NodeKind, SortDir, StatusData, SubKey, Tree,
 };
 use crate::scan::ScanOutcome;
+use crate::ui::codeview::CodeView;
 use crate::ui::preview::Preview;
+use crate::ui::reader::{Handoff, Reader, ReaderExit};
+
+/// Rows the tree selection moves per wheel notch.
+const WHEEL_TREE_ROWS: i64 = 1;
+/// Lines a scrollable view (preview / reader) moves per wheel notch.
+const WHEEL_PREVIEW_LINES: i32 = 3;
+
+/// Which pane receives Normal-mode navigation keys and is drawn focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Tree,
+    Preview,
+}
+
+/// The pane rectangles from the last render, for mouse hit-testing. Only the
+/// focusable panes are tracked; a point over the detail pane or chrome hits
+/// neither and leaves focus unchanged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PaneRects {
+    pub tree: Rect,
+    pub preview: Option<Rect>,
+}
+
+impl PaneRects {
+    /// Which focusable pane (if any) contains the point.
+    pub fn hit(&self, col: u16, row: u16) -> Option<Focus> {
+        if self.preview.is_some_and(|r| contains(r, col, row)) {
+            Some(Focus::Preview)
+        } else if contains(self.tree, col, row) {
+            Some(Focus::Tree)
+        } else {
+            None
+        }
+    }
+}
+
+fn contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x
+        && col < r.x.saturating_add(r.width)
+        && row >= r.y
+        && row < r.y.saturating_add(r.height)
+}
+
+/// Cached, fully-built tree-table render inputs (rows + resolved columns) for a
+/// given content revision, width, and computing state. Reused on pure
+/// navigation frames: selection and scroll changes don't alter row *content*
+/// (ratatui applies the row highlight from `table_state` at render time), so the
+/// rows are rebuilt only when content changes (`rebuild_rev`), the pane is
+/// resized (`width`), or the active lens's computing state flips (the `…`
+/// placeholder). Built and populated by `ui::tree_view::render`.
+pub struct RowCache {
+    pub(crate) rows: Vec<Row<'static>>,
+    pub(crate) header: Row<'static>,
+    pub(crate) widths: Vec<Constraint>,
+    pub(crate) width: u16,
+    pub(crate) rev: u64,
+    pub(crate) computing: bool,
+}
 
 /// Which screen the app is currently showing.
 pub enum Screen {
     Loading,
     // Boxed: `Loaded` is much larger than the other variants.
     Loaded(Box<Loaded>),
+    /// The full-screen file reader; owns the suspended tree, restored on exit.
+    Reader(Box<Reader>),
     Error(String),
 }
 
@@ -29,14 +92,6 @@ pub enum Screen {
 pub enum Mode {
     Normal,
     Filter,
-}
-
-/// How a queued file open should hand off to an external program: `View` runs
-/// the pager (`$PAGER`), `Edit` runs the editor (`$VISUAL`/`$EDITOR`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenMode {
-    View,
-    Edit,
 }
 
 /// State for the loaded, interactive tree.
@@ -59,6 +114,12 @@ pub struct Loaded {
     pub preview_for: Option<NodeId>,
     /// Cached preview content for the selected node.
     pub preview: Preview,
+    /// Scroll state for the text preview; rebuilt when the selection changes.
+    pub preview_view: CodeView,
+    /// Which pane has keyboard focus (and the highlighted border).
+    pub focus: Focus,
+    /// Pane rectangles from the last render, for mouse hit-testing.
+    pub panes: PaneRects,
     /// Active name filter (empty = no filter).
     pub filter: String,
     /// Hide rows whose value is zero under the active lens.
@@ -70,6 +131,12 @@ pub struct Loaded {
     pub sort_dir: SortDir,
     /// Whether the (computed) code layer reported a parsing ambiguity.
     pub inaccurate: bool,
+    /// Bumped on every content rebuild; part of the row-cache key so navigation
+    /// frames reuse the built rows but any content change rebuilds them.
+    pub rebuild_rev: u64,
+    /// Cached tree-table render inputs reused across navigation frames; see
+    /// [`RowCache`].
+    pub row_cache: Option<RowCache>,
     // Lazily-computed, cached per-lens metric layers.
     pub code: Layer<CodeData>,
     pub churn: Layer<ChurnData>,
@@ -86,13 +153,17 @@ pub struct App {
     pub spinner: usize,
     pub elapsed: Duration,
     pub should_quit: bool,
-    /// A file the user asked to open externally (view in `$PAGER` or edit in
-    /// `$EDITOR`), drained by the event loop (which owns the terminal) after each
-    /// key press.
-    pub pending_open: Option<(PathBuf, OpenMode)>,
+    /// A file the user asked to edit in `$EDITOR` (Shift+Enter / `e`), drained by
+    /// the event loop (which owns the terminal) after each key press. Viewing now
+    /// opens the in-TUI reader instead of shelling out to `$PAGER`.
+    pub pending_edit: Option<PathBuf>,
     /// A lens whose data must be computed; drained by the event loop, which
     /// spawns the background collector.
     pub pending_compute: Option<Lens>,
+    /// A requested mouse-capture change (the release-capture toggle); drained by
+    /// the event loop, which owns the terminal. `Some(false)` releases capture
+    /// for native selection, `Some(true)` re-grabs it.
+    pub pending_capture: Option<bool>,
     /// Whether the root is inside a git repository (gates the git lenses).
     pub repo: bool,
     /// Terminal image-protocol picker for the preview pane, probed once at
@@ -111,8 +182,9 @@ impl App {
             spinner: 0,
             elapsed: Duration::ZERO,
             should_quit: false,
-            pending_open: None,
+            pending_edit: None,
             pending_compute: None,
+            pending_capture: None,
             repo: false,
             picker: None,
         }
@@ -123,12 +195,18 @@ impl App {
     pub fn is_busy(&self) -> bool {
         match &self.screen {
             Screen::Loading => true,
-            Screen::Loaded(loaded) => {
-                loaded.code.is_computing()
-                    || loaded.churn.is_computing()
-                    || loaded.status.is_computing()
-            }
+            Screen::Loaded(loaded) => loaded.any_computing(),
+            Screen::Reader(reader) => reader.loaded.any_computing(),
             Screen::Error(_) => false,
+        }
+    }
+
+    /// The interactive tree state, whether shown directly or behind the reader.
+    fn loaded_mut(&mut self) -> Option<&mut Loaded> {
+        match &mut self.screen {
+            Screen::Loaded(loaded) => Some(loaded),
+            Screen::Reader(reader) => Some(&mut reader.loaded),
+            _ => None,
         }
     }
 
@@ -156,7 +234,7 @@ impl App {
     /// tree is rebuilt (preserving expansion and selection by path) and the
     /// cached metric layers are invalidated, with the active lens re-requested.
     pub fn on_rescan(&mut self, outcome: ScanOutcome) {
-        let Screen::Loaded(loaded) = &mut self.screen else {
+        let Some(loaded) = self.loaded_mut() else {
             // Still loading: treat this as the initial scan.
             self.on_scan(outcome);
             return;
@@ -178,7 +256,7 @@ impl App {
 
     /// Apply a freshly-computed lens layer (from a background collector).
     pub fn on_layer(&mut self, result: LayerResult) {
-        if let Screen::Loaded(loaded) = &mut self.screen {
+        if let Some(loaded) = self.loaded_mut() {
             loaded.apply_layer(result);
         }
     }
@@ -189,6 +267,14 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
             self.should_quit = true;
+            return;
+        }
+
+        // The full-screen reader owns all input while it is open.
+        if let Screen::Reader(reader) = &mut self.screen {
+            if matches!(reader.handle_key(key), ReaderExit::ToTree) {
+                self.close_reader();
+            }
             return;
         }
 
@@ -246,8 +332,128 @@ impl App {
     }
 
     fn toggle_preview(&mut self) {
+        let root = self.root.clone();
+        let picker = self.picker.as_ref();
         if let Screen::Loaded(loaded) = &mut self.screen {
             loaded.show_preview = !loaded.show_preview;
+            // Paint the first preview immediately on enable; later selection
+            // changes are debounced off the navigation hot path (event loop).
+            if loaded.show_preview {
+                loaded.ensure_preview(&root, picker);
+            }
+        }
+    }
+
+    /// The selected node whose preview is on screen but not yet cached — the
+    /// target the event loop debounces a refresh toward. `None` when the preview
+    /// is hidden, folded away, or already current; used to keep the syntax
+    /// highlight off the per-frame navigation path.
+    pub fn preview_target_id(&self) -> Option<NodeId> {
+        let Screen::Loaded(loaded) = &self.screen else {
+            return None;
+        };
+        if loaded.show_preview && loaded.panes.preview.is_some() {
+            let sel = loaded.selected_id();
+            if sel != loaded.preview_for {
+                return sel;
+            }
+        }
+        None
+    }
+
+    /// Load the preview for the current selection. Driven by the event loop's
+    /// debounce timer so the file read + highlight never runs on a nav frame.
+    pub fn refresh_preview(&mut self) {
+        let root = self.root.clone();
+        let picker = self.picker.as_ref();
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.ensure_preview(&root, picker);
+        }
+    }
+
+    /// Move keyboard focus between the tree and the preview pane. Only focuses
+    /// the preview when it is actually on screen.
+    fn cycle_focus(&mut self) {
+        if let Screen::Loaded(loaded) = &mut self.screen {
+            loaded.focus = match loaded.focus {
+                Focus::Tree if loaded.panes.preview.is_some() => Focus::Preview,
+                _ => Focus::Tree,
+            };
+        }
+    }
+
+    /// Copy the focused pane's content to the system clipboard via OSC 52: the
+    /// visible preview text, or the selected node's path when the tree is focused.
+    fn yank(&mut self) {
+        let Screen::Loaded(loaded) = &self.screen else {
+            return;
+        };
+        let text = match loaded.focus {
+            Focus::Preview => loaded.preview_view.visible_text(),
+            Focus::Tree => loaded
+                .selected_id()
+                .map(|id| loaded.tree.nodes[id].rel_path.display().to_string())
+                .unwrap_or_default(),
+        };
+        if !text.is_empty() {
+            crate::clipboard::osc52_copy(&text);
+        }
+    }
+
+    /// Queue a mouse-capture flip for the event loop: releasing capture lets the
+    /// terminal's native click-drag selection work; toggling again re-grabs it.
+    fn toggle_mouse_capture(&mut self) {
+        self.pending_capture = Some(!crate::tui::mouse_captured());
+    }
+
+    /// A wheel scroll at a screen position. The wheel acts on the pane under the
+    /// cursor and focuses it (interact-to-focus). `delta` is signed steps
+    /// (positive = down); the event loop passes ±1 per wheel event, moving 1
+    /// tree row / 3 preview lines per notch. Every target clamps, so a scroll
+    /// can't run off the edge.
+    pub fn handle_scroll(&mut self, col: u16, row: u16, delta: i32) {
+        match &mut self.screen {
+            Screen::Loaded(loaded) => match loaded.panes.hit(col, row) {
+                Some(Focus::Preview) => {
+                    loaded.focus = Focus::Preview;
+                    loaded.preview_view.scroll_by(delta * WHEEL_PREVIEW_LINES);
+                }
+                Some(Focus::Tree) => {
+                    loaded.focus = Focus::Tree;
+                    loaded.move_by(delta as i64 * WHEEL_TREE_ROWS);
+                }
+                None => {}
+            },
+            // The full-screen reader scrolls its view with the wheel too.
+            Screen::Reader(reader) => reader.scroll(delta * WHEEL_PREVIEW_LINES),
+            _ => {}
+        }
+    }
+
+    /// A left click focuses the pane under the cursor (interact-to-focus). An
+    /// idle hover never changes focus — only deliberate interaction does. In the
+    /// tree it also moves the selection to the clicked row; clicking the
+    /// already-selected row activates it (like Enter: expand/descend a dir, open
+    /// a file). A click on the border, header, or blank rows only focuses.
+    pub fn handle_click(&mut self, col: u16, row: u16) {
+        let mut activate = false;
+        if let Screen::Loaded(loaded) = &mut self.screen
+            && let Some(focus) = loaded.panes.hit(col, row)
+        {
+            loaded.focus = focus;
+            if focus == Focus::Tree
+                && let Some(index) = loaded.row_at(row)
+            {
+                if loaded.table_state.selected() == Some(index) {
+                    activate = true;
+                } else {
+                    loaded.move_to(index);
+                }
+            }
+        }
+        // The `loaded` borrow above has ended; activation re-borrows `self`.
+        if activate {
+            self.open_selected();
         }
     }
 
@@ -274,6 +480,9 @@ impl App {
             Action::TogglePreview => self.toggle_preview(),
             Action::CycleLens => self.cycle_lens(),
             Action::JumpLens(n) => self.jump_lens(n),
+            Action::CycleFocus => self.cycle_focus(),
+            Action::Yank => self.yank(),
+            Action::ToggleMouseCapture => self.toggle_mouse_capture(),
             other => {
                 if let Screen::Loaded(loaded) = &mut self.screen {
                     loaded.handle(other);
@@ -324,8 +533,8 @@ impl App {
         }
     }
 
-    /// Enter on the selection: expand/descend a directory, or queue the selected
-    /// file to view in the user's pager.
+    /// Enter on the selection: expand/descend a directory, or open the selected
+    /// file in the full-screen reader.
     fn open_selected(&mut self) {
         let Screen::Loaded(loaded) = &mut self.screen else {
             return;
@@ -338,14 +547,40 @@ impl App {
             return;
         }
         let rel_path = loaded.tree.nodes[id].rel_path.clone();
-        self.pending_open = Some((self.root.join(rel_path), OpenMode::View));
+        self.open_reader(self.root.join(rel_path));
+    }
+
+    /// Replace the loaded tree with a full-screen reader over `path`, moving the
+    /// boxed tree state into the reader so exiting restores it whole.
+    fn open_reader(&mut self, path: PathBuf) {
+        let Screen::Loaded(loaded) = std::mem::replace(&mut self.screen, Screen::Loading) else {
+            return; // unreachable: only called from the loaded screen
+        };
+        let reader = Reader::open(loaded, path, self.picker.as_ref());
+        self.screen = Screen::Reader(Box::new(reader));
+    }
+
+    /// Close the reader, restoring the tree it was holding.
+    fn close_reader(&mut self) {
+        if let Screen::Reader(reader) = std::mem::replace(&mut self.screen, Screen::Loading) {
+            self.screen = Screen::Loaded(reader.loaded);
+        }
+    }
+
+    /// Take a pending external handoff (`$EDITOR`/`$PAGER`) requested from inside
+    /// the reader, for the event loop to run while the TUI is suspended.
+    pub fn take_reader_handoff(&mut self) -> Option<Handoff> {
+        match &mut self.screen {
+            Screen::Reader(reader) => reader.pending_handoff.take(),
+            _ => None,
+        }
     }
 
     /// Shift+Enter / `e` on the selection: queue the selected file to edit in the
     /// user's editor. A no-op on directories.
     fn edit_selected(&mut self) {
         if let Some(path) = self.selected_file_path() {
-            self.pending_open = Some((path, OpenMode::Edit));
+            self.pending_edit = Some(path);
         }
     }
 
@@ -376,12 +611,17 @@ impl Loaded {
             show_preview: true,
             preview_for: None,
             preview: Preview::Empty,
+            preview_view: CodeView::default(),
+            focus: Focus::Tree,
+            panes: PaneRects::default(),
             filter: String::new(),
             hide_zeros: false,
             active_lens: Lens::Code,
             sort_key: Lens::Code.default_sub_key(),
             sort_dir: SortDir::Desc,
             inaccurate: false,
+            rebuild_rev: 0,
+            row_cache: None,
             code: Layer::NotComputed,
             churn: Layer::NotComputed,
             status: Layer::NotComputed,
@@ -413,6 +653,11 @@ impl Loaded {
                 let path = root.join(&self.tree.nodes[id].rel_path);
                 crate::ui::preview::load(&path, picker)
             }
+        };
+        // Reset the preview's scroll state for the new content.
+        self.preview_view = match &self.preview {
+            Preview::Text(lines) => CodeView::new(lines.clone()),
+            _ => CodeView::default(),
         };
     }
 
@@ -468,6 +713,11 @@ impl Loaded {
     /// The status layer entry for a node, if the status layer is computed.
     pub fn status_at(&self, id: NodeId) -> Option<&StatusData> {
         self.status.ready().map(|values| &values[id])
+    }
+
+    /// Whether any lens layer is still being computed (keeps the spinner alive).
+    pub fn any_computing(&self) -> bool {
+        self.code.is_computing() || self.churn.is_computing() || self.status.is_computing()
     }
 
     /// Whether the active lens's layer is still being computed.
@@ -596,6 +846,9 @@ impl Loaded {
     /// Recompute the visible list (honoring filter + declutter), keeping the
     /// selection on the same node when possible.
     fn rebuild(&mut self) {
+        // Content is changing: invalidate the cached table rows (the renderer
+        // keys its row cache on this counter).
+        self.rebuild_rev = self.rebuild_rev.wrapping_add(1);
         let previous_id = self.selected_id();
         let previous_index = self.table_state.selected();
         let mut visible = if self.filter.is_empty() {
@@ -620,6 +873,11 @@ impl Loaded {
     }
 
     fn handle(&mut self, action: Action) {
+        // When the preview pane is focused, navigation scrolls it instead of
+        // the tree; unhandled actions fall through to the tree below.
+        if self.focus == Focus::Preview && self.handle_preview_action(action) {
+            return;
+        }
         match action {
             Action::Down => self.move_by(1),
             Action::Up => self.move_by(-1),
@@ -648,6 +906,24 @@ impl Loaded {
         }
     }
 
+    /// Route a navigation action to the focused preview pane. Returns whether it
+    /// was consumed (movement keys scroll the preview; anything else falls
+    /// through to the tree).
+    fn handle_preview_action(&mut self, action: Action) -> bool {
+        match action {
+            Action::Down => self.preview_view.scroll_by(1),
+            Action::Up => self.preview_view.scroll_by(-1),
+            Action::PageDown => self.preview_view.page(1),
+            Action::PageUp => self.preview_view.page(-1),
+            Action::First => self.preview_view.goto_top(),
+            Action::Last => self.preview_view.goto_bottom(),
+            Action::Collapse => self.preview_view.scroll_h(-4),
+            Action::Expand => self.preview_view.scroll_h(4),
+            _ => return false,
+        }
+        true
+    }
+
     fn move_by(&mut self, delta: i64) {
         if self.visible.is_empty() {
             return;
@@ -664,6 +940,23 @@ impl Loaded {
         }
         self.table_state
             .select(Some(index.min(self.visible.len() - 1)));
+    }
+
+    /// Map a screen `row` to a visible-list index, or `None` if it lands on the
+    /// border/header/blank rows. Data rows begin at `panes.tree.y + 2` (the top
+    /// border + the header) and span `viewport_rows`; the scroll offset comes
+    /// from ratatui's `table_state` (read-only — the table still owns scroll).
+    fn row_at(&self, row: u16) -> Option<usize> {
+        let first = self.panes.tree.y.saturating_add(2);
+        if row < first {
+            return None; // border or header
+        }
+        let in_view = (row - first) as usize;
+        if in_view >= self.viewport_rows {
+            return None; // below the last drawn data row
+        }
+        let index = self.table_state.offset() + in_view;
+        (index < self.visible.len()).then_some(index)
     }
 
     fn expand_or_descend(&mut self) {
@@ -817,6 +1110,275 @@ mod tests {
         loaded.active_lens
     }
 
+    /// Give the loaded screen a tree pane on the left and a preview on the right.
+    fn set_panes(app: &mut App) {
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.panes = PaneRects {
+                tree: Rect::new(0, 0, 40, 20),
+                preview: Some(Rect::new(80, 0, 40, 20)),
+            };
+        }
+    }
+
+    /// Set the visible-rows count the renderer normally records each frame, so
+    /// `row_at` accepts clicks below the first data row in unit tests.
+    fn set_viewport(app: &mut App, rows: usize) {
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.viewport_rows = rows;
+        }
+    }
+
+    fn focus(app: &App) -> Focus {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.focus
+    }
+
+    fn selected_index(app: &App) -> usize {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.table_state.selected().unwrap()
+    }
+
+    fn rebuild_rev(app: &App) -> u64 {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.rebuild_rev
+    }
+
+    #[test]
+    fn pane_hit_test_maps_point_to_focus() {
+        let panes = PaneRects {
+            tree: Rect::new(0, 0, 40, 20),
+            preview: Some(Rect::new(80, 0, 40, 20)),
+        };
+        assert_eq!(panes.hit(5, 5), Some(Focus::Tree));
+        assert_eq!(panes.hit(90, 5), Some(Focus::Preview));
+        assert_eq!(panes.hit(60, 5), None); // the gap between the panes
+        assert_eq!(panes.hit(5, 50), None); // below both panes
+    }
+
+    #[test]
+    fn click_focuses_the_pane_under_the_cursor() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        app.handle_click(90, 5);
+        assert_eq!(focus(&app), Focus::Preview);
+        app.handle_click(5, 5);
+        assert_eq!(focus(&app), Focus::Tree);
+        // A click over neither pane leaves focus unchanged.
+        app.handle_click(90, 5);
+        app.handle_click(60, 5);
+        assert_eq!(focus(&app), Focus::Preview);
+    }
+
+    #[test]
+    fn click_selects_the_clicked_tree_row() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "src");
+        app.update(Action::Expand); // ≥3 visible rows
+        app.update(Action::First); // selection (and offset) at the top
+        // Data rows start at screen row 2 (top border + header); the third data
+        // row is screen row 4 → visible index 2.
+        app.handle_click(5, 4);
+        assert_eq!(selected_index(&app), 2);
+        assert_eq!(focus(&app), Focus::Tree);
+    }
+
+    #[test]
+    fn click_on_the_header_or_border_only_focuses() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        app.update(Action::First);
+        let before = selected_index(&app);
+        app.handle_click(5, 0); // top border
+        assert_eq!(focus(&app), Focus::Tree);
+        assert_eq!(selected_index(&app), before);
+        app.handle_click(5, 1); // header row
+        assert_eq!(selected_index(&app), before);
+    }
+
+    #[test]
+    fn clicking_the_selected_directory_row_activates_it() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "src");
+        assert!(!is_visible(&app, "main.rs"));
+        // Clicking the already-selected row activates it (like Enter) → expands.
+        let row = 2 + selected_index(&app) as u16;
+        app.handle_click(5, row);
+        assert!(is_visible(&app, "main.rs"));
+    }
+
+    #[test]
+    fn clicking_the_selected_file_row_opens_the_reader() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "README.md");
+        // Clicking the already-selected file row activates it → opens the reader.
+        let row = 2 + selected_index(&app) as u16;
+        app.handle_click(5, row);
+        assert!(matches!(app.screen, Screen::Reader(_)));
+    }
+
+    #[test]
+    fn content_changes_bump_the_rebuild_rev_but_navigation_does_not() {
+        let mut app = sample_app();
+        select(&mut app, "src");
+        let base = rebuild_rev(&app);
+
+        // Plain navigation never rebuilds content, so the rev is stable (the
+        // renderer reuses its cached rows on these frames).
+        app.update(Action::Down);
+        app.update(Action::Up);
+        assert_eq!(rebuild_rev(&app), base, "navigation must not bump the rev");
+
+        // Expansion, sorting, and filtering each change content → rebuild.
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        let after_expand = rebuild_rev(&app);
+        assert!(after_expand > base, "expansion should bump the rev");
+        app.update(Action::CycleSort);
+        let after_sort = rebuild_rev(&app);
+        assert!(after_sort > after_expand, "sorting should bump the rev");
+        app.set_filter("rs".into());
+        assert!(
+            rebuild_rev(&app) > after_sort,
+            "filtering should bump the rev"
+        );
+    }
+
+    #[test]
+    fn clicking_a_new_tree_row_selects_without_activating() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "src");
+        // Click README.md's row (a different, not-yet-selected row): it selects
+        // but does not activate, so the reader never opens.
+        let readme = {
+            let Screen::Loaded(loaded) = &app.screen else {
+                panic!("not loaded");
+            };
+            loaded
+                .visible
+                .iter()
+                .position(|&id| loaded.tree.nodes[id].name == "README.md")
+                .unwrap()
+        };
+        app.handle_click(5, 2 + readme as u16);
+        assert!(matches!(app.screen, Screen::Loaded(_)));
+        assert_eq!(selected_index(&app), readme);
+    }
+
+    #[test]
+    fn wheel_moves_by_notch_count_and_focuses_the_pane() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "src");
+        app.update(Action::Expand); // reveal main.rs / app.rs so there is room
+        app.update(Action::First); // start at the top
+        let top = selected_index(&app);
+
+        // Over the tree, the wheel moves by the coalesced notch count: a spin of
+        // N notches moves N rows, and focuses the pane it acts on.
+        app.handle_scroll(5, 5, 2);
+        assert_eq!(selected_index(&app), top + 2);
+        assert_eq!(focus(&app), Focus::Tree);
+
+        // A big spin clamps to the last row rather than running off the end.
+        app.update(Action::Last);
+        let last = selected_index(&app);
+        app.update(Action::First);
+        app.handle_scroll(5, 5, 99);
+        assert_eq!(selected_index(&app), last);
+
+        // Scrolling up by a big spin clamps back to the top.
+        app.handle_scroll(5, 5, -99);
+        assert_eq!(selected_index(&app), top);
+
+        // Over the preview, the wheel scrolls the preview view (not the tree
+        // selection) and focuses the preview.
+        let now = selected_index(&app);
+        app.handle_scroll(90, 5, 1);
+        assert_eq!(selected_index(&app), now);
+        assert_eq!(focus(&app), Focus::Preview);
+    }
+
+    #[test]
+    fn preview_refresh_is_gated_until_the_selection_settles() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "src");
+
+        // The selection differs from the cached preview, so a refresh is due —
+        // this is the signal the event loop debounces on, keeping the file read
+        // + syntax highlight off the per-frame navigation path.
+        assert!(app.preview_target_id().is_some());
+
+        // Once loaded the target clears, so nav frames request no more work.
+        app.refresh_preview();
+        assert_eq!(app.preview_target_id(), None);
+
+        // With the preview hidden there is never a target to refresh.
+        app.update(Action::TogglePreview);
+        select(&mut app, "README.md");
+        assert_eq!(app.preview_target_id(), None);
+    }
+
+    #[test]
+    fn navigation_scrolls_the_preview_when_it_is_focused() {
+        let mut app = sample_app();
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        select(&mut app, "src");
+        let before = selected_index(&app);
+
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.focus = Focus::Preview;
+        }
+        app.update(Action::Down);
+        assert_eq!(
+            selected_index(&app),
+            before,
+            "tree selection must not move while the preview is focused"
+        );
+
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.focus = Focus::Tree;
+        }
+        app.update(Action::Down);
+        assert_eq!(selected_index(&app), before + 1);
+    }
+
+    #[test]
+    fn cycle_focus_requires_a_visible_preview() {
+        let mut app = sample_app();
+        app.update(Action::CycleFocus);
+        assert_eq!(focus(&app), Focus::Tree); // no preview rect recorded yet
+        set_panes(&mut app);
+        app.update(Action::CycleFocus);
+        assert_eq!(focus(&app), Focus::Preview);
+        app.update(Action::CycleFocus);
+        assert_eq!(focus(&app), Focus::Tree);
+    }
+
+    #[test]
+    fn toggle_mouse_capture_queues_a_flip() {
+        let mut app = sample_app();
+        app.update(Action::ToggleMouseCapture);
+        // Capture starts off in tests (tui::init never ran), so this requests on.
+        assert_eq!(app.pending_capture, Some(true));
+    }
+
     #[test]
     fn on_scan_requests_the_default_code_lens() {
         let tree = build_skeleton(&[(PathBuf::from("a.rs"), 1)], &[], "p".into());
@@ -831,14 +1393,35 @@ mod tests {
     }
 
     #[test]
-    fn enter_on_a_file_queues_it_for_viewing() {
+    fn enter_on_a_file_opens_the_reader() {
         let mut app = sample_app();
         select(&mut app, "README.md");
         app.update(Action::Open);
-        assert_eq!(
-            app.pending_open,
-            Some((PathBuf::from("/proj/README.md"), OpenMode::View))
-        );
+        assert!(app.pending_edit.is_none(), "should not shell out to $PAGER");
+        match &app.screen {
+            Screen::Reader(reader) => {
+                assert_eq!(reader.path, PathBuf::from("/proj/README.md"));
+            }
+            _ => panic!("expected the reader screen"),
+        }
+    }
+
+    #[test]
+    fn closing_the_reader_restores_the_tree() {
+        let mut app = sample_app();
+        // Expand `src` so the restored tree must remember the expansion.
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        assert!(is_visible(&app, "main.rs"));
+
+        select(&mut app, "README.md");
+        app.update(Action::Open);
+        assert!(matches!(app.screen, Screen::Reader(_)));
+
+        // `q` in the reader returns to the tree with state intact.
+        app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.screen, Screen::Loaded(_)));
+        assert!(is_visible(&app, "main.rs"), "expansion should be preserved");
     }
 
     #[test]
@@ -846,10 +1429,7 @@ mod tests {
         let mut app = sample_app();
         select(&mut app, "README.md");
         app.update(Action::Edit);
-        assert_eq!(
-            app.pending_open,
-            Some((PathBuf::from("/proj/README.md"), OpenMode::Edit))
-        );
+        assert_eq!(app.pending_edit, Some(PathBuf::from("/proj/README.md")));
     }
 
     #[test]
@@ -857,18 +1437,18 @@ mod tests {
         let mut app = sample_app();
         select(&mut app, "src");
         app.update(Action::Edit);
-        assert!(app.pending_open.is_none());
+        assert!(app.pending_edit.is_none());
         // Unlike Enter, editing a directory does not expand it.
         assert!(!is_visible(&app, "main.rs"));
     }
 
     #[test]
-    fn enter_on_a_directory_expands_without_queuing() {
+    fn enter_on_a_directory_expands_without_opening_the_reader() {
         let mut app = sample_app();
         assert!(!is_visible(&app, "main.rs"));
         select(&mut app, "src");
         app.update(Action::Open);
-        assert!(app.pending_open.is_none());
+        assert!(matches!(app.screen, Screen::Loaded(_)));
         assert!(is_visible(&app, "main.rs"));
     }
 

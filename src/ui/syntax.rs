@@ -57,6 +57,24 @@ pub fn highlight(text: &str, path: &Path) -> Vec<Line<'static>> {
         .collect()
 }
 
+/// A human-readable language name for `path`/`text`, or `None` for plain text.
+///
+/// Used for the reader's title bar. Detection mirrors [`highlight`]: extension
+/// first, then the first-line heuristic.
+pub fn language_name(path: &Path, text: &str) -> Option<String> {
+    let assets = assets();
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(|ext| assets.syntaxes.find_syntax_by_extension(ext))
+        .or_else(|| {
+            text.lines()
+                .next()
+                .and_then(|first| assets.syntaxes.find_syntax_by_first_line(first))
+        })
+        .map(|syntax| syntax.name.clone())
+        .filter(|name| name != "Plain Text")
+}
+
 /// Convert one highlighted line's `(style, slice)` ranges into a ratatui line,
 /// dropping the trailing newline that `LinesWithEndings` keeps.
 fn to_line(ranges: &[(SynStyle, &str)]) -> Line<'static> {

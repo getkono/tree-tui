@@ -2,15 +2,21 @@
 
 use std::time::{Duration, Instant};
 
-use crossterm::event::{Event, EventStream, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::app::{App, OpenMode, Screen};
+use crate::app::{App, Screen};
 use crate::collect::{self, LayerResult};
 use crate::scan::ScanOutcome;
+use crate::ui::reader::Handoff;
 use crate::{editor, pager, scan, tui, ui, watch};
+
+/// How long the selection must rest before the preview's (synchronous) file
+/// read + syntax highlight runs. A held key / wheel spin keeps moving the
+/// selection and so keeps pushing this out, keeping highlight off nav frames.
+const PREVIEW_DEBOUNCE: Duration = Duration::from_millis(80);
 
 /// Drive the app until the user quits or input is exhausted.
 ///
@@ -31,25 +37,21 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
     let mut rescan_again = false;
     let mut events = EventStream::new();
     let mut ticker = tokio::time::interval(Duration::from_millis(120));
+    // Debounced preview refresh: the node the preview should show once the
+    // selection settles, and the deadline at which to load it.
+    let mut preview_target = app.preview_target_id();
+    let mut preview_deadline: Option<tokio::time::Instant> = None;
 
     terminal.draw(|frame| ui::render(frame, app))?;
 
     while !app.should_quit {
         let mut redraw = false;
         tokio::select! {
+            // One terminal event per iteration — the standard crossterm/ratatui
+            // pattern. `apply_event` reports whether anything changed on screen,
+            // so idle events (mouse motion is not even tracked) cost no redraw.
             maybe_event = events.next() => match maybe_event {
-                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    app.handle_key(key);
-                    if let Some((path, mode)) = app.pending_open.take() {
-                        match mode {
-                            OpenMode::View => tui::suspended(terminal, || pager::open(&path))?,
-                            OpenMode::Edit => tui::suspended(terminal, || editor::open(&path))?,
-                        }
-                    }
-                    redraw = true;
-                }
-                Some(Ok(Event::Resize(_, _))) => redraw = true,
-                Some(Ok(_)) => {}
+                Some(Ok(event)) => redraw = apply_event(terminal, app, event)?,
                 Some(Err(err)) => return Err(err.into()),
                 None => app.should_quit = true,
             },
@@ -91,6 +93,24 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
                 app.elapsed = started.elapsed();
                 redraw = true;
             },
+            // The selection has rested long enough: load the preview now (the
+            // synchronous read + highlight happens here, off the nav frames).
+            _ = async { tokio::time::sleep_until(preview_deadline.unwrap()).await },
+                if preview_deadline.is_some() =>
+            {
+                preview_deadline = None;
+                app.refresh_preview();
+                redraw = true;
+            },
+        }
+
+        // (Re)arm the preview debounce when the selection moves to a new,
+        // not-yet-cached node; while navigating it keeps getting pushed out, so
+        // the highlight runs only once the selection settles (~one debounce).
+        let target = app.preview_target_id();
+        if target != preview_target {
+            preview_target = target;
+            preview_deadline = target.map(|_| tokio::time::Instant::now() + PREVIEW_DEBOUNCE);
         }
 
         // Drain a requested lens computation onto a blocking thread.
@@ -108,6 +128,76 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
         if redraw {
             terminal.draw(|frame| ui::render(frame, app))?;
         }
+    }
+    Ok(())
+}
+
+/// Apply one terminal event to the app, handling any external handoff a key
+/// triggers. Returns whether the screen needs repainting — events the UI
+/// ignores (key releases, bare mouse buttons, focus/paste) change nothing.
+fn apply_event(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    event: Event,
+) -> color_eyre::Result<bool> {
+    let redraw = match event {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+            app.handle_key(key);
+            drain_pending_edit(terminal, app)?;
+            drain_reader_handoff(terminal, app)?;
+            drain_pending_capture(app);
+            true
+        }
+        // Wheel scrolls and a left click act on the pane under the cursor; one
+        // step per event. Motion is not tracked, so nothing floods the loop.
+        Event::Mouse(m) => match m.kind {
+            MouseEventKind::ScrollDown => {
+                app.handle_scroll(m.column, m.row, 1);
+                true
+            }
+            MouseEventKind::ScrollUp => {
+                app.handle_scroll(m.column, m.row, -1);
+                true
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                app.handle_click(m.column, m.row);
+                true
+            }
+            _ => false,
+        },
+        Event::Resize(_, _) => true,
+        // Key releases, focus changes, paste: nothing to repaint for.
+        _ => false,
+    };
+    Ok(redraw)
+}
+
+/// Apply a queued mouse-capture flip from the release-capture toggle.
+fn drain_pending_capture(app: &mut App) {
+    if let Some(on) = app.pending_capture.take() {
+        let _ = tui::set_mouse_capture(on);
+    }
+}
+
+/// Suspend the TUI to run `$EDITOR`/`$PAGER` if the reader queued a handoff. The
+/// reader stays open across it, so we return to the reader on the way back.
+fn drain_reader_handoff(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
+    if let Some(handoff) = app.take_reader_handoff() {
+        match handoff {
+            Handoff::EditAtLine { path, line } => {
+                tui::suspended(terminal, || editor::open_at_line(&path, line))?
+            }
+            Handoff::Pager { path } => tui::suspended(terminal, || pager::open(&path))?,
+        }
+    }
+    Ok(())
+}
+
+/// Suspend the TUI to run `$EDITOR` if a key queued an edit. Drained per key so
+/// two edits in one burst each suspend and restore correctly.
+fn drain_pending_edit(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
+    if let Some(path) = app.pending_edit.take() {
+        tui::suspended(terminal, || editor::open(&path))?;
     }
     Ok(())
 }

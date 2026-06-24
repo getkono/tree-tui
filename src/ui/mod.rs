@@ -1,11 +1,13 @@
 //! Rendering: dispatch by screen state and lay out the top-level regions.
 
+pub mod codeview;
 mod detail;
 mod footer;
 mod header;
 mod help;
 mod loading;
 pub mod preview;
+pub mod reader;
 mod syntax;
 pub mod theme;
 mod tree_view;
@@ -16,7 +18,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
-use crate::app::{App, Mode, Screen};
+use crate::app::{App, Focus, Mode, PaneRects, Screen};
 
 /// Minimum body width/height before the preview pane is shown; below either, it
 /// folds away so the tree keeps the room.
@@ -34,6 +36,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_loaded(frame, app, area);
     } else if matches!(app.screen, Screen::Loading) {
         loading::render(frame, app, area);
+    } else if let Screen::Reader(reader) = &mut app.screen {
+        reader::render(frame, reader, area);
     } else if let Screen::Error(message) = &app.screen {
         render_error(frame, message, area);
     }
@@ -45,10 +49,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     // Copy/borrow scalar state out before borrowing `screen` mutably.
-    let root = app.root.clone();
     let root_label = app.root_label.clone();
     let editing = app.mode == Mode::Filter;
-    let picker = app.picker.as_ref();
     let Screen::Loaded(loaded) = &mut app.screen else {
         return;
     };
@@ -87,6 +89,16 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     let preview_area = show_preview.then(|| chunks[next]);
 
+    // Record pane rects for the next frame's mouse hit-testing, and keep focus
+    // on the tree when the preview has folded away.
+    loaded.panes = PaneRects {
+        tree: tree_area,
+        preview: preview_area,
+    };
+    if preview_area.is_none() && loaded.focus == Focus::Preview {
+        loaded.focus = Focus::Tree;
+    }
+
     if loaded.visible.is_empty() {
         render_empty(frame, &loaded.filter, tree_area);
     } else {
@@ -94,7 +106,9 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if let Some(preview_area) = preview_area {
-        loaded.ensure_preview(&root, picker);
+        // The preview content is loaded off the render path — debounced by the
+        // event loop so a held key / wheel spin never pays a file read + syntax
+        // highlight per frame (that synchronous cost is what made nav lurch).
         preview::render(frame, loaded, preview_area);
     }
 
@@ -238,6 +252,46 @@ mod tests {
     }
 
     #[test]
+    fn navigation_reuses_the_row_cache_but_content_changes_rebuild_it() {
+        use crate::action::Action;
+        let mut app = sample_app();
+        let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        let rev = |app: &App| {
+            let Screen::Loaded(l) = &app.screen else {
+                panic!("not loaded");
+            };
+            l.rebuild_rev
+        };
+        let first = rev(&app);
+
+        // The render populated a cache keyed to the current content, width, and
+        // computing state.
+        if let Screen::Loaded(l) = &app.screen {
+            let c = l.row_cache.as_ref().expect("render populates the cache");
+            assert_eq!(c.rev, first);
+            assert_eq!(c.width, 96);
+            assert_eq!(c.computing, l.active_computing());
+        }
+
+        // Pure navigation doesn't change content, so the rev is stable and the
+        // next render reuses the cache.
+        app.update(Action::Down);
+        assert_eq!(rev(&app), first, "navigation must not rebuild content");
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+
+        // A content change bumps the rev; the next render rebuilds to match.
+        app.update(Action::CycleSort);
+        let after = rev(&app);
+        assert!(after > first, "sorting changes content");
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        if let Screen::Loaded(l) = &app.screen {
+            assert_eq!(l.row_cache.as_ref().unwrap().rev, after);
+        }
+    }
+
+    #[test]
     fn renders_a_sole_subdir_chain_as_one_concatenated_row() {
         // `src/main/java` is a chain of sole sub-directories: it must render as a
         // single concatenated row, never as separate `main` / `java` rows.
@@ -305,6 +359,34 @@ mod tests {
         wide.draw(|frame| render(frame, &mut app)).unwrap();
         let view = format!("{}", wide.backend());
         assert!(!view.contains("preview"), "preview should be off:\n{view}");
+    }
+
+    #[test]
+    fn renders_focused_text_preview_with_line_numbers() {
+        use crate::app::Focus;
+        let mut app = sample_app();
+        // Inject a text preview, focus the preview pane, and pin the cache key so
+        // the renderer's `ensure_preview` won't overwrite our injected content.
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            let lines = super::syntax::highlight(
+                "fn main() {}\nlet x = 1;\n",
+                std::path::Path::new("x.rs"),
+            );
+            loaded.preview = super::preview::Preview::Text(lines.clone());
+            loaded.preview_view = super::codeview::CodeView::new(lines);
+            loaded.preview_for = loaded.selected_id();
+            loaded.focus = Focus::Preview;
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(view.contains("preview"), "preview title missing:\n{view}");
+        assert!(view.contains("fn main"), "code text missing:\n{view}");
+        // The line-number gutter renders "1" and "2" for the two lines.
+        assert!(
+            view.contains('1') && view.contains('2'),
+            "gutter missing:\n{view}"
+        );
     }
 
     #[test]
