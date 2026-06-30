@@ -145,7 +145,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Upload binaries to the release
@@ -173,7 +173,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           merge-multiple: true
       - name: Render formula
