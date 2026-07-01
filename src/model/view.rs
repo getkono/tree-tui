@@ -17,12 +17,26 @@ pub fn sort_by_values(tree: &mut Tree, values: &[u128], dir: SortDir) {
     });
 }
 
-/// Order every node's children alphabetically (case-insensitive), then by path.
+/// Order every node's children with directories first, then alphabetically
+/// (case-insensitive) within each group, then by path. Directories always lead
+/// files: only the name ordering flips with `dir`, never the dir/file grouping.
 pub fn sort_by_name(tree: &mut Tree, dir: SortDir) {
     sort_children(tree, |a, b, nodes| {
-        let primary = name_key(&nodes[a]).cmp(&name_key(&nodes[b]));
-        orient(primary, dir).then_with(|| nodes[a].rel_path.cmp(&nodes[b].rel_path))
+        kind_rank(&nodes[a])
+            .cmp(&kind_rank(&nodes[b]))
+            .then_with(|| {
+                let primary = name_key(&nodes[a]).cmp(&name_key(&nodes[b]));
+                orient(primary, dir).then_with(|| nodes[a].rel_path.cmp(&nodes[b].rel_path))
+            })
     });
+}
+
+/// Sort rank that lifts directories above files, independent of direction.
+fn kind_rank(node: &TreeNode) -> u8 {
+    match node.kind {
+        NodeKind::Dir => 0,
+        NodeKind::File => 1,
+    }
 }
 
 /// Shared driver: take each node's children out so the comparator can borrow the
@@ -254,6 +268,33 @@ mod tests {
         let values = byte_values(&tree);
         sort_by_values(&mut tree, &values, SortDir::Desc);
         assert_eq!(names(&tree), ["logo.png", "main.rs"]);
+    }
+
+    /// A directory (`mid`) alphabetically after some files and before others, so
+    /// only a dirs-first rule — not the name key — can lift it above them all.
+    fn dir_amid_files() -> Tree {
+        let files = vec![
+            (rel("apple.rs"), 1),
+            (rel("mid/inner.rs"), 1),
+            (rel("zebra.rs"), 1),
+        ];
+        let dirs = vec![rel("mid")];
+        build_skeleton(&files, &dirs, "p".into())
+    }
+
+    #[test]
+    fn sort_by_name_lifts_dirs_above_files_ascending() {
+        let mut tree = dir_amid_files();
+        sort_by_name(&mut tree, SortDir::Asc);
+        assert_eq!(names(&tree), ["mid", "apple.rs", "zebra.rs"]);
+    }
+
+    #[test]
+    fn sort_by_name_keeps_dirs_first_when_reversed() {
+        let mut tree = dir_amid_files();
+        sort_by_name(&mut tree, SortDir::Desc);
+        // Names flip within each group, but the directory still leads.
+        assert_eq!(names(&tree), ["mid", "zebra.rs", "apple.rs"]);
     }
 
     fn nested() -> Tree {
