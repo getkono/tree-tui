@@ -50,6 +50,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     // Copy/borrow scalar state out before borrowing `screen` mutably.
     let root_label = app.root_label.clone();
+    let head_hash = app.head_hash.clone();
     let editing = app.mode == Mode::Filter;
     let Screen::Loaded(loaded) = &mut app.screen else {
         return;
@@ -63,7 +64,13 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     ])
     .areas(area);
 
-    header::render(frame, &root_label, loaded, header_area);
+    header::render(
+        frame,
+        &root_label,
+        head_hash.as_deref(),
+        loaded,
+        header_area,
+    );
 
     // Right-side panes appear as room allows: the detail panel takes a fixed
     // column; the preview pane takes a share of the width, folding away on a
@@ -216,6 +223,7 @@ mod tests {
             tree,
             duration: Duration::from_millis(12),
             repo: false,
+            head: None,
         });
 
         let mut layer = HashMap::new();
@@ -249,6 +257,26 @@ mod tests {
         assert!(view.contains("src"));
         assert!(view.contains("README.md"));
         assert!(view.contains("Markdown"));
+    }
+
+    #[test]
+    fn renders_the_head_hash_left_of_the_loc_summary() {
+        let mut app = sample_app();
+        app.head_hash = Some("9ee4e1e".into());
+        let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        // The hash sits on the recap line, to the left of the "lines" total.
+        let recap = view
+            .lines()
+            .find(|line| line.contains("lines"))
+            .expect("the code lens recap line is rendered");
+        let hash_at = recap.find("9ee4e1e").expect("the head hash is shown");
+        let lines_at = recap.find("lines").unwrap();
+        assert!(
+            hash_at < lines_at,
+            "hash must be left of the LOC summary:\n{view}"
+        );
     }
 
     #[test]
@@ -333,6 +361,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
 
         let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();

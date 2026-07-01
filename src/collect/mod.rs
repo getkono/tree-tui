@@ -15,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::model::{ChurnData, CodeData, Lens, StatusData};
 
-pub use git::is_repo;
+pub use git::{head_short_hash, is_repo};
 pub use walk::walk;
 
 /// The per-file data produced by computing one lens, tagged by which lens it is

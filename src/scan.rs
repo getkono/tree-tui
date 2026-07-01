@@ -19,6 +19,8 @@ pub struct ScanOutcome {
     pub duration: Duration,
     /// Whether the root is inside a git repository (gates the git lenses).
     pub repo: bool,
+    /// Short hash of the repository's current `HEAD`, if the root is a git repo.
+    pub head: Option<String>,
 }
 
 /// Walk `root` on a blocking thread, returning a receiver for the skeleton.
@@ -29,12 +31,14 @@ pub fn spawn(root: PathBuf, root_label: String) -> oneshot::Receiver<ScanOutcome
         let result = collect::walk(&root);
         let tree = build_skeleton(&result.files, &result.dirs, root_label);
         let repo = collect::is_repo(&root);
+        let head = collect::head_short_hash(&root);
 
         // The receiver is dropped if the user quits mid-scan; ignore that.
         let _ = tx.send(ScanOutcome {
             tree,
             duration: started.elapsed(),
             repo,
+            head,
         });
     });
     rx

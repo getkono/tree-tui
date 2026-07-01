@@ -10,7 +10,13 @@ use super::theme;
 use crate::app::Loaded;
 use crate::model::{Lens, SubKey};
 
-pub fn render(frame: &mut Frame, root_label: &str, loaded: &Loaded, area: Rect) {
+pub fn render(
+    frame: &mut Frame,
+    root_label: &str,
+    head_hash: Option<&str>,
+    loaded: &Loaded,
+    area: Rect,
+) {
     let tree = &loaded.tree;
     let root = tree.root;
     let scanned = if loaded.duration.as_millis() >= 1000 {
@@ -56,12 +62,23 @@ pub fn render(frame: &mut Frame, root_label: &str, loaded: &Loaded, area: Rect) 
         ));
     }
 
+    // The second line summarizes the active lens's grand totals (for the default
+    // code lens, the LOC summary). Prefix the repo's HEAD short hash to its left.
+    let mut recap = lens_recap(loaded);
+    if let Some(hash) = head_hash {
+        recap.spans.insert(0, Span::raw("   "));
+        recap.spans.insert(
+            0,
+            Span::styled(hash.to_string(), Style::default().fg(theme::MUTED)),
+        );
+    }
+
     let block = Block::bordered()
         .title(" tree ")
         .border_style(Style::default().fg(theme::MUTED))
         .padding(Padding::horizontal(1));
     frame.render_widget(
-        Paragraph::new(vec![Line::from(line1), lens_recap(loaded)]).block(block),
+        Paragraph::new(vec![Line::from(line1), recap]).block(block),
         area,
     );
 }
