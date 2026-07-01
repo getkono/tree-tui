@@ -45,7 +45,16 @@ run = "convco check origin/master..HEAD"
 [tasks.commit-msg-check]
 description = "Lint a single commit message file against Conventional Commits (commit-msg hook)"
 usage = 'arg "<file>" help="Path to the commit message file"'
-run = 'convco check --from-stdin --strip < "${usage_file}"'
+# Skip git's auto-generated merge template ("Merge branch ...") — it isn't a
+# Conventional Commit, and convco can't detect merges over --from-stdin (no
+# parent info, and --ignore-message-pattern doesn't apply to stdin). A range
+# check (`commit-check`) already omits merge commits by default.
+run = '''
+if grep -qE '^Merge ' "${usage_file}"; then
+  exit 0
+fi
+convco check --from-stdin --strip < "${usage_file}"
+'''
 
 [tasks.check]
 description = "Run format check, lint, and tests"
