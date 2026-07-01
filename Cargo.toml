@@ -13,7 +13,7 @@ readme = "README.md"
 keywords = ["tui", "ratatui", "cli", "directory", "filesystem"]
 categories = ["command-line-utilities", "visualization"]
 # Keep the published tarball to what's needed to build the crate.
-exclude = ["/.github", "/AGENTS.md", "/CLAUDE.md", "/Cross.toml", "/hk.pkl", "/mise.toml", "/release-plz.toml"]
+exclude = ["/.github", "/AGENTS.md", "/CLAUDE.md", "/Cross.toml", "/hk.pkl", "/mise.toml", "/release-plz.toml", "/scripts", "/assets"]
 
 # The binary is invoked as `tree [dir]` (note: shadows the system `tree` once installed).
 [[bin]]
