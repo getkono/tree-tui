@@ -21,6 +21,14 @@ pub fn is_repo(root: &Path) -> bool {
     gix::discover(root).is_ok()
 }
 
+/// The short (7-hex) hash of the repository's current `HEAD` commit, or `None`
+/// when `root` is not in a git repository or `HEAD` is unborn.
+pub fn head_short_hash(root: &Path) -> Option<String> {
+    let repo = gix::discover(root).ok()?;
+    let head = repo.head_id().ok()?;
+    Some(head.to_hex_with_len(7).to_string())
+}
+
 /// Per-file churn (lines added/deleted and commit touches) over the most recent
 /// [`CHURN_MAX_COMMITS`] commits reachable from HEAD.
 ///

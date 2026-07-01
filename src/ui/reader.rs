@@ -536,6 +536,7 @@ mod tests {
             tree,
             duration: std::time::Duration::ZERO,
             repo: false,
+            head: None,
         });
         let crate::app::Screen::Loaded(loaded) = app.screen else {
             unreachable!()

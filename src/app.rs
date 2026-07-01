@@ -190,6 +190,9 @@ pub struct App {
     pub pending_capture: Option<bool>,
     /// Whether the root is inside a git repository (gates the git lenses).
     pub repo: bool,
+    /// Short hash of the repository's current `HEAD`, shown in the header. `None`
+    /// outside a git repository or on an unborn `HEAD`.
+    pub head_hash: Option<String>,
     /// Terminal image-protocol picker for the preview pane, probed once at
     /// startup. `None` in tests and when the terminal can't be queried.
     pub picker: Option<Picker>,
@@ -210,6 +213,7 @@ impl App {
             pending_compute: None,
             pending_capture: None,
             repo: false,
+            head_hash: None,
             picker: None,
         }
     }
@@ -238,6 +242,7 @@ impl App {
     /// the default lens's data.
     pub fn on_scan(&mut self, outcome: ScanOutcome) {
         self.repo = outcome.repo;
+        self.head_hash = outcome.head;
         let mut loaded = Loaded::new(outcome.tree, outcome.duration);
         loaded.apply_sort();
         // The default lens (code) reads a layer; kick off its computation.
@@ -273,6 +278,7 @@ impl App {
             loaded.mark_computing(active);
         }
         self.repo = outcome.repo;
+        self.head_hash = outcome.head;
         if needs_layer {
             self.pending_compute = Some(active);
         }
@@ -1229,6 +1235,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
         // Simulate the event loop draining the initial code request.
         app.pending_compute = None;
@@ -1253,6 +1260,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
         app.pending_compute = None;
         app
@@ -1389,6 +1397,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
         app.pending_compute = None;
         app
@@ -1474,6 +1483,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
         app.pending_compute = None;
         app.update(Action::ExpandAll);
@@ -1741,6 +1751,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
         assert_eq!(app.pending_compute, Some(Lens::Code));
         assert!(app.is_busy());
@@ -1941,6 +1952,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
 
         // Expansion preserved (main.rs still visible) and the new file appears.
@@ -1990,6 +2002,7 @@ mod tests {
             tree,
             duration: Duration::ZERO,
             repo: false,
+            head: None,
         });
 
         let Screen::Loaded(loaded) = &app.screen else {
