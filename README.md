@@ -12,6 +12,12 @@ tree [dir]   # dir defaults to the current directory
 Press `m` to cycle lenses (or `1`–`4` to jump). Every file shows up — source, binaries, images,
 lockfiles — not just code, so the size and git lenses are meaningful too.
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/getkono/tree-tui/master/assets/tree.svg"
+       alt="tree-tui on the code lens: src/ expanded with a per-file line breakdown and a syntax-highlighted preview pane"
+       width="900">
+</p>
+
 ## Lenses
 
 | Key | Lens | Shows |
@@ -137,12 +143,16 @@ or a collector.
 | `mise run lint`     | Lint with Clippy (deny warnings)     |
 | `mise run lint-fix` | Lint and auto-fix                    |
 | `mise run check`    | Format check + lint + test           |
+| `mise run svg`      | Regenerate the README preview SVG    |
 
 ### Prerequisites
 
 - [Rust (rustup)](https://rustup.rs) — toolchain, pinned via `rust-toolchain.toml`
 - [mise](https://mise.jdx.dev) — manages dev tools and tasks
 - [hk](https://hk.jdx.dev) — git hooks manager (`mise install` then `hk install`)
+- The `svg` task additionally needs [freeze](https://github.com/charmbracelet/freeze) (provisioned by
+  `mise install`) and `tmux` (a system package; it captures a frame of the running TUI — see
+  `scripts/gen-svg.sh`)
 
 ## Git Hooks
 
