@@ -61,7 +61,7 @@ pub fn render(
                 Style::default().fg(theme::WARN),
             )),
             None => spans.push(muted(
-                "   m lens · s sort · r reverse · z declutter · / filter · ? help · q quit"
+                "   m lens · s sort · r reverse · z declutter · x exclude · / filter · ? help · q quit"
                     .to_string(),
             )),
         }

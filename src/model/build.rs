@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn skeleton_aggregates_bytes_and_files() {
         let tree = skeleton();
-        assert_eq!(tree.total_files(), 4);
+        assert_eq!(tree.nodes[tree.root].files, 4);
         assert_eq!(tree.total_bytes(), 6480);
 
         let src = tree.nodes.iter().find(|n| n.name == "src").unwrap();

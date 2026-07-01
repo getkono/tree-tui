@@ -30,10 +30,12 @@ pub fn render(frame: &mut Frame, root_label: &str, loaded: &Loaded, area: Rect) 
         dot.clone(),
         Span::raw(format!(
             "{} files",
-            theme::group_thousands(tree.total_files())
+            theme::group_thousands(loaded.effective_value(SubKey::Files, root) as usize)
         )),
         dot.clone(),
-        Span::raw(theme::human_bytes(tree.total_bytes())),
+        Span::raw(theme::human_bytes(
+            loaded.effective_value(SubKey::Bytes, root) as u64,
+        )),
         dot.clone(),
         Span::styled(
             format!("scanned in {scanned}"),
@@ -76,7 +78,7 @@ fn lens_recap(loaded: &Loaded) -> Line<'static> {
     }
 
     let root = loaded.tree.root;
-    let value = |key: SubKey| loaded.value(key, root);
+    let value = |key: SubKey| loaded.effective_value(key, root);
     let gap = "   ";
     let label = |text: &'static str| Span::styled(text, Style::default().fg(theme::MUTED));
     let strong = |value: u128| {
@@ -108,7 +110,7 @@ fn lens_recap(loaded: &Loaded) -> Line<'static> {
         ]),
         Lens::Size => Line::from(vec![
             Span::styled(
-                theme::human_bytes(loaded.tree.total_bytes()),
+                theme::human_bytes(value(SubKey::Bytes) as u64),
                 Style::default()
                     .fg(theme::SIZE)
                     .add_modifier(Modifier::BOLD),

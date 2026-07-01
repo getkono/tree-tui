@@ -88,11 +88,6 @@ impl Tree {
     pub fn total_bytes(&self) -> u64 {
         self.nodes[self.root].bytes
     }
-
-    /// Total file count (the root's aggregated tally).
-    pub fn total_files(&self) -> usize {
-        self.nodes[self.root].files
-    }
 }
 
 /// A lazily-computed, cached per-lens metric layer, indexed by [`NodeId`].
