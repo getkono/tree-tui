@@ -2,8 +2,9 @@
 # The Rust toolchain itself is pinned in rust-toolchain.toml (rustup), not here.
 
 [tools]
-hk = "1.48.0"            # git hooks manager (see hk.pkl)
-"cargo:convco" = "0.6.4" # Conventional Commits linter (built from source; not in mise's registry)
+hk = "1.48.0"                          # git hooks manager (see hk.pkl)
+"cargo:convco" = "0.6.4"               # Conventional Commits linter (built from source; not in mise's registry)
+"aqua:charmbracelet/freeze" = "0.2.2"  # renders the README preview SVG (see scripts/gen-svg.sh)
 
 # After `mise install`, wire up hk's git hooks through mise so they resolve hk + tools
 # without requiring shell activation. Skipped in CI, where the hooks aren't installed.
@@ -59,3 +60,7 @@ convco check --from-stdin --strip < "${usage_file}"
 [tasks.check]
 description = "Run format check, lint, and tests"
 depends = ["fmt-check", "lint", "test"]
+
+[tasks.svg]
+description = "Regenerate assets/tree.svg (a preview screenshot of the TUI)"
+run = "bash scripts/gen-svg.sh"
