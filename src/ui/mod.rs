@@ -292,6 +292,32 @@ mod tests {
     }
 
     #[test]
+    fn excluding_a_directory_updates_the_rendered_header_totals() {
+        use crate::action::Action;
+        let mut app = sample_app();
+        // Select the src directory (4000 + 2000 bytes across 2 files).
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            let idx = loaded
+                .visible
+                .iter()
+                .position(|&id| loaded.tree.nodes[id].name == "src")
+                .expect("src is visible");
+            loaded.table_state.select(Some(idx));
+        }
+        app.update(Action::ToggleExclude);
+
+        let mut terminal = Terminal::new(TestBackend::new(96, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        // Only README.md remains counted, so the header drops from 3 files to 1.
+        assert!(view.contains("1 files"), "totals should adjust:\n{view}");
+        assert!(
+            !view.contains("3 files"),
+            "excluded files must not be counted:\n{view}"
+        );
+    }
+
+    #[test]
     fn renders_a_sole_subdir_chain_as_one_concatenated_row() {
         // `src/main/java` is a chain of sole sub-directories: it must render as a
         // single concatenated row, never as separate `main` / `java` rows.

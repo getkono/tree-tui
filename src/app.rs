@@ -124,6 +124,15 @@ pub struct Loaded {
     pub filter: String,
     /// Hide rows whose value is zero under the active lens.
     pub hide_zeros: bool,
+    /// Nodes the user has excluded from the aggregate statistics, keyed by
+    /// `rel_path` so the choice survives rescans (ids are not stable across
+    /// walks). Excluded subtrees stay visible but are subtracted from every
+    /// ancestor total; see [`Loaded::effective_value`].
+    pub excluded: HashSet<PathBuf>,
+    /// The top-most excluded node ids (an excluded node with no excluded
+    /// ancestor), derived from `excluded` via [`Loaded::refresh_exclusion`].
+    /// Cached so the read-time arithmetic doesn't re-resolve paths per query.
+    excluded_roots: HashSet<NodeId>,
     /// The active lens (which metric drives the view).
     pub active_lens: Lens,
     /// The sort sub-key (scoped to the active lens).
@@ -616,6 +625,8 @@ impl Loaded {
             panes: PaneRects::default(),
             filter: String::new(),
             hide_zeros: false,
+            excluded: HashSet::new(),
+            excluded_roots: HashSet::new(),
             active_lens: Lens::Code,
             sort_key: Lens::Code.default_sub_key(),
             sort_dir: SortDir::Desc,
@@ -685,7 +696,78 @@ impl Loaded {
 
     /// The active lens's headline value for node `id` (the bar / zero-test value).
     pub fn primary_value(&self, id: NodeId) -> u128 {
-        self.value(self.active_lens.primary().key, id)
+        self.effective_value(self.active_lens.primary().key, id)
+    }
+
+    /// The value of `key` for node `id` with any excluded subtrees subtracted.
+    ///
+    /// Aggregation is a pure bottom-up sum, so an excluded subtree's
+    /// contribution to `id` equals that subtree root's stored value. We keep the
+    /// cached layers pristine and subtract the top-most excluded roots that fall
+    /// strictly within `id`'s subtree — an excluded node's own row therefore
+    /// still shows its full total (it's only dimmed), while its ancestors shrink.
+    pub fn effective_value(&self, key: SubKey, id: NodeId) -> u128 {
+        let mut total = self.value(key, id);
+        for &root in &self.excluded_roots {
+            if root != id && self.is_ancestor(id, root) {
+                total = total.saturating_sub(self.value(key, root));
+            }
+        }
+        total
+    }
+
+    /// Whether `id` is excluded, i.e. it or one of its ancestors is an excluded
+    /// root. Drives the dimmed/struck-through styling of the whole subtree.
+    pub fn is_excluded(&self, id: NodeId) -> bool {
+        if self.excluded_roots.is_empty() {
+            return false;
+        }
+        let mut cur = Some(id);
+        while let Some(node) = cur {
+            if self.excluded_roots.contains(&node) {
+                return true;
+            }
+            cur = self.tree.nodes[node].parent;
+        }
+        false
+    }
+
+    /// Whether `ancestor` is a strict ancestor of `descendant`.
+    fn is_ancestor(&self, ancestor: NodeId, descendant: NodeId) -> bool {
+        let mut cur = self.tree.nodes[descendant].parent;
+        while let Some(node) = cur {
+            if node == ancestor {
+                return true;
+            }
+            cur = self.tree.nodes[node].parent;
+        }
+        false
+    }
+
+    /// Recompute `excluded_roots` from the `excluded` rel-paths against the
+    /// current arena: resolve each path to its id (dropping any not in this
+    /// walk) and keep only those with no excluded ancestor. Call after mutating
+    /// `excluded` or swapping the tree.
+    fn refresh_exclusion(&mut self) {
+        let ids: HashSet<NodeId> = self
+            .excluded
+            .iter()
+            .filter_map(|path| self.tree.index.get(path).copied())
+            .collect();
+        self.excluded_roots = ids
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let mut cur = self.tree.nodes[id].parent;
+                while let Some(node) = cur {
+                    if ids.contains(&node) {
+                        return false;
+                    }
+                    cur = self.tree.nodes[node].parent;
+                }
+                true
+            })
+            .collect();
     }
 
     /// The concatenated display name for a row (a chain of sole sub-directories,
@@ -818,6 +900,9 @@ impl Loaded {
             }
         }
 
+        // Re-resolve exclusion roots against the new arena (paths persist).
+        self.refresh_exclusion();
+
         self.apply_sort(); // rebuilds the visible list
 
         // Restore the selection on the same path when it still exists.
@@ -836,7 +921,7 @@ impl Loaded {
             model::view::sort_by_name(&mut self.tree, self.sort_dir);
         } else {
             let values: Vec<u128> = (0..self.tree.nodes.len())
-                .map(|id| self.value(self.sort_key, id))
+                .map(|id| self.effective_value(self.sort_key, id))
                 .collect();
             model::view::sort_by_values(&mut self.tree, &values, self.sort_dir);
         }
@@ -901,6 +986,16 @@ impl Loaded {
             Action::ToggleZeros => {
                 self.hide_zeros = !self.hide_zeros;
                 self.rebuild();
+            }
+            Action::ToggleExclude => {
+                if let Some(id) = self.selected_id() {
+                    let path = self.tree.nodes[id].rel_path.clone();
+                    if !self.excluded.remove(&path) {
+                        self.excluded.insert(path);
+                    }
+                    self.refresh_exclusion();
+                    self.apply_sort();
+                }
             }
             _ => {}
         }
@@ -1147,6 +1242,69 @@ mod tests {
             panic!("not loaded");
         };
         loaded.rebuild_rev
+    }
+
+    /// The root node's effective value for `key` (totals after exclusions).
+    fn root_effective(app: &App, key: SubKey) -> u128 {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        loaded.effective_value(key, loaded.tree.root)
+    }
+
+    /// Whether the node named `name` is currently marked excluded.
+    fn is_excluded(app: &App, name: &str) -> bool {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded");
+        };
+        let id = loaded
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.name == name)
+            .unwrap_or_else(|| panic!("no node named {name}"));
+        loaded.is_excluded(id)
+    }
+
+    #[test]
+    fn excluding_a_directory_subtracts_its_subtree_from_totals() {
+        // /proj = src/main.rs (1000 bytes) + README.md (200 bytes) → 1200, 2 files.
+        let mut app = sample_app();
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1200);
+        assert_eq!(root_effective(&app, SubKey::Files), 2);
+
+        // Excluding src drops its subtree (main.rs) from the root totals, and the
+        // whole subtree reads as excluded for styling.
+        select(&mut app, "src");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 200);
+        assert_eq!(root_effective(&app, SubKey::Files), 1);
+        assert!(is_excluded(&app, "src"));
+        assert!(is_excluded(&app, "main.rs"), "subtree inherits exclusion");
+        assert!(!is_excluded(&app, "README.md"));
+
+        // Re-toggling restores the full totals.
+        select(&mut app, "src");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1200);
+        assert_eq!(root_effective(&app, SubKey::Files), 2);
+        assert!(!is_excluded(&app, "src"));
+    }
+
+    #[test]
+    fn nested_exclusion_is_not_double_counted() {
+        let mut app = sample_app();
+
+        // Exclude the src directory, then also exclude main.rs inside it. Only the
+        // top-most excluded root (src) is subtracted, so the total stays at 200
+        // rather than underflowing to zero.
+        select(&mut app, "src");
+        app.update(Action::ToggleExclude);
+        app.update(Action::Expand); // reveal main.rs under the (excluded) src
+        select(&mut app, "main.rs");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 200);
+        assert_eq!(root_effective(&app, SubKey::Files), 1);
     }
 
     #[test]

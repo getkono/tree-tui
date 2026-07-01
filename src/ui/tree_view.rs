@@ -133,7 +133,12 @@ impl Columns {
             cells.push(num_cell(loaded, col, id, computing, false));
         }
         cells.push(num_cell(loaded, &self.primary, id, computing, true));
-        Row::new(cells)
+        let row = Row::new(cells);
+        if loaded.is_excluded(id) {
+            row.style(Style::default().add_modifier(Modifier::DIM | Modifier::CROSSED_OUT))
+        } else {
+            row
+        }
     }
 }
 
@@ -240,7 +245,7 @@ fn num_cell(
     let text = if computing {
         "…".to_string()
     } else {
-        theme::format_value(col.key, loaded.value(col.key, id))
+        theme::format_value(col.key, loaded.effective_value(col.key, id))
     };
     let mut style = Style::default();
     if let Some(color) = theme::tint_color(col.tint) {
