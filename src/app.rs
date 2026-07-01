@@ -124,15 +124,30 @@ pub struct Loaded {
     pub filter: String,
     /// Hide rows whose value is zero under the active lens.
     pub hide_zeros: bool,
-    /// Nodes the user has excluded from the aggregate statistics, keyed by
-    /// `rel_path` so the choice survives rescans (ids are not stable across
-    /// walks). Excluded subtrees stay visible but are subtracted from every
-    /// ancestor total; see [`Loaded::effective_value`].
+    /// Nodes the user has explicitly **excluded** from the aggregate statistics,
+    /// keyed by `rel_path` so the choice survives rescans (ids are not stable
+    /// across walks). Exclusion is inherited by the whole subtree unless a
+    /// descendant is re-included via `included`. Excluded subtrees stay visible
+    /// but are subtracted from every ancestor total; see
+    /// [`Loaded::effective_value`].
     pub excluded: HashSet<PathBuf>,
-    /// The top-most excluded node ids (an excluded node with no excluded
-    /// ancestor), derived from `excluded` via [`Loaded::refresh_exclusion`].
-    /// Cached so the read-time arithmetic doesn't re-resolve paths per query.
-    excluded_roots: HashSet<NodeId>,
+    /// Nodes the user has explicitly **re-included** as exceptions carved out of
+    /// an otherwise-excluded subtree, also keyed by `rel_path`. Tracking
+    /// exclusion and inclusion as independent, directory-level intents — rather
+    /// than lowering "exclude this directory except that file" into "exclude
+    /// each of the directory's current files" — is lossless: files that appear
+    /// later under an excluded directory stay excluded, and only the named
+    /// exceptions keep counting.
+    pub included: HashSet<PathBuf>,
+    /// Resolved node ids where the effective exclusion state *flips* going down
+    /// the tree: `exclude_boundaries` are excluded nodes whose inherited state
+    /// is included, `include_boundaries` the reverse. Derived from
+    /// `excluded`/`included` by [`Loaded::refresh_exclusion`] and cached so the
+    /// read-time arithmetic in [`Loaded::effective_value`] never re-resolves
+    /// paths per query. Redundant markers (matching their inherited state) are
+    /// omitted, so these hold only the genuine transitions.
+    exclude_boundaries: HashSet<NodeId>,
+    include_boundaries: HashSet<NodeId>,
     /// The active lens (which metric drives the view).
     pub active_lens: Lens,
     /// The sort sub-key (scoped to the active lens).
@@ -626,7 +641,9 @@ impl Loaded {
             filter: String::new(),
             hide_zeros: false,
             excluded: HashSet::new(),
-            excluded_roots: HashSet::new(),
+            included: HashSet::new(),
+            exclude_boundaries: HashSet::new(),
+            include_boundaries: HashSet::new(),
             active_lens: Lens::Code,
             sort_key: Lens::Code.default_sub_key(),
             sort_dir: SortDir::Desc,
@@ -699,33 +716,52 @@ impl Loaded {
         self.effective_value(self.active_lens.primary().key, id)
     }
 
-    /// The value of `key` for node `id` with any excluded subtrees subtracted.
+    /// The value of `key` for node `id` with excluded subtrees subtracted and
+    /// re-included exceptions added back.
     ///
     /// Aggregation is a pure bottom-up sum, so an excluded subtree's
-    /// contribution to `id` equals that subtree root's stored value. We keep the
-    /// cached layers pristine and subtract the top-most excluded roots that fall
-    /// strictly within `id`'s subtree — an excluded node's own row therefore
-    /// still shows its full total (it's only dimmed), while its ancestors shrink.
+    /// contribution to `id` equals that subtree root's stored value. Because
+    /// exclusion and inclusion boundaries strictly alternate down any path,
+    /// subtracting each `exclude_boundaries` subtree and adding back each
+    /// `include_boundaries` subtree telescopes to exactly the included leaves —
+    /// no re-aggregation and no retained per-file maps. A boundary nested inside
+    /// another makes the running subtotal dip below zero mid-sum (an excluded
+    /// directory's value is subtracted before its re-included child is added),
+    /// so we accumulate signed and clamp only at the end. An *excluded* `id`'s
+    /// own row still shows its full total (it's only dimmed).
     pub fn effective_value(&self, key: SubKey, id: NodeId) -> u128 {
-        let mut total = self.value(key, id);
-        for &root in &self.excluded_roots {
-            if root != id && self.is_ancestor(id, root) {
-                total = total.saturating_sub(self.value(key, root));
+        if self.is_excluded(id) {
+            return self.value(key, id);
+        }
+        let mut total = self.value(key, id) as i128;
+        for &boundary in &self.exclude_boundaries {
+            if self.is_ancestor(id, boundary) {
+                total -= self.value(key, boundary) as i128;
             }
         }
-        total
+        for &boundary in &self.include_boundaries {
+            if self.is_ancestor(id, boundary) {
+                total += self.value(key, boundary) as i128;
+            }
+        }
+        total.max(0) as u128
     }
 
-    /// Whether `id` is excluded, i.e. it or one of its ancestors is an excluded
-    /// root. Drives the dimmed/struck-through styling of the whole subtree.
+    /// Whether `id` is effectively excluded: the nearest exclusion/inclusion
+    /// boundary on the path from `id` up to the root is an exclusion (with no
+    /// boundary at all, the default is included). Drives the dimmed/struck-
+    /// through styling of the subtree.
     pub fn is_excluded(&self, id: NodeId) -> bool {
-        if self.excluded_roots.is_empty() {
+        if self.exclude_boundaries.is_empty() && self.include_boundaries.is_empty() {
             return false;
         }
         let mut cur = Some(id);
         while let Some(node) = cur {
-            if self.excluded_roots.contains(&node) {
+            if self.exclude_boundaries.contains(&node) {
                 return true;
+            }
+            if self.include_boundaries.contains(&node) {
+                return false;
             }
             cur = self.tree.nodes[node].parent;
         }
@@ -744,28 +780,59 @@ impl Loaded {
         false
     }
 
-    /// Recompute `excluded_roots` from the `excluded` rel-paths against the
-    /// current arena: resolve each path to its id (dropping any not in this
-    /// walk) and keep only those with no excluded ancestor. Call after mutating
-    /// `excluded` or swapping the tree.
+    /// The effective exclusion state at `start` (walk up, nearest resolved
+    /// marker wins; default included), evaluated against explicit resolved
+    /// marker id-sets. Used by [`Loaded::refresh_exclusion`] to classify each
+    /// marker as a real boundary or a redundant no-op.
+    fn resolved_excluded(
+        &self,
+        start: Option<NodeId>,
+        excluded: &HashSet<NodeId>,
+        included: &HashSet<NodeId>,
+    ) -> bool {
+        let mut cur = start;
+        while let Some(node) = cur {
+            if excluded.contains(&node) {
+                return true;
+            }
+            if included.contains(&node) {
+                return false;
+            }
+            cur = self.tree.nodes[node].parent;
+        }
+        false
+    }
+
+    /// Recompute the boundary caches from the `excluded`/`included` rel-paths
+    /// against the current arena: resolve each path to its id (dropping any not
+    /// in this walk), then keep only the markers that actually flip the
+    /// inherited state — an excluded node under an included parent, or an
+    /// included node under an excluded parent. Redundant markers are ignored
+    /// (they stay in the path sets so they survive rescans, but contribute
+    /// nothing). Call after mutating `excluded`/`included` or swapping the tree.
     fn refresh_exclusion(&mut self) {
-        let ids: HashSet<NodeId> = self
+        let excluded_ids: HashSet<NodeId> = self
             .excluded
             .iter()
             .filter_map(|path| self.tree.index.get(path).copied())
             .collect();
-        self.excluded_roots = ids
+        let included_ids: HashSet<NodeId> = self
+            .included
+            .iter()
+            .filter_map(|path| self.tree.index.get(path).copied())
+            .collect();
+        self.exclude_boundaries = excluded_ids
             .iter()
             .copied()
             .filter(|&id| {
-                let mut cur = self.tree.nodes[id].parent;
-                while let Some(node) = cur {
-                    if ids.contains(&node) {
-                        return false;
-                    }
-                    cur = self.tree.nodes[node].parent;
-                }
-                true
+                !self.resolved_excluded(self.tree.nodes[id].parent, &excluded_ids, &included_ids)
+            })
+            .collect();
+        self.include_boundaries = included_ids
+            .iter()
+            .copied()
+            .filter(|&id| {
+                self.resolved_excluded(self.tree.nodes[id].parent, &excluded_ids, &included_ids)
             })
             .collect();
     }
@@ -990,8 +1057,23 @@ impl Loaded {
             Action::ToggleExclude => {
                 if let Some(id) = self.selected_id() {
                     let path = self.tree.nodes[id].rel_path.clone();
-                    if !self.excluded.remove(&path) {
-                        self.excluded.insert(path);
+                    // Flip the row's *effective* state. We only keep an explicit
+                    // marker when it overrides what the node would otherwise
+                    // inherit; when the target state already matches the parent,
+                    // clearing both markers is enough (e.g. re-including a file
+                    // whose directory is not excluded restores the plain
+                    // default, and re-excluding it needs no marker either).
+                    let want_excluded = !self.is_excluded(id);
+                    let parent = self.tree.nodes[id].parent;
+                    let inherited_excluded = parent.is_some_and(|p| self.is_excluded(p));
+                    self.excluded.remove(&path);
+                    self.included.remove(&path);
+                    if want_excluded != inherited_excluded {
+                        if want_excluded {
+                            self.excluded.insert(path);
+                        } else {
+                            self.included.insert(path);
+                        }
                     }
                     self.refresh_exclusion();
                     self.apply_sort();
@@ -1291,20 +1373,134 @@ mod tests {
         assert!(!is_excluded(&app, "src"));
     }
 
-    #[test]
-    fn nested_exclusion_is_not_double_counted() {
-        let mut app = sample_app();
+    /// A loaded app with two files under `src` plus a top-level README, for
+    /// exercising re-inclusion exceptions carved out of an excluded directory.
+    /// `/proj` = src/main.rs (1000) + src/lib.rs (500) + README.md (200).
+    fn exclusion_app() -> App {
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 1000),
+            (PathBuf::from("src/lib.rs"), 500),
+            (PathBuf::from("README.md"), 200),
+        ];
+        let dirs = vec![PathBuf::from("src")];
+        let tree = build_skeleton(&files, &dirs, "proj".into());
+        let mut app = App::new(PathBuf::from("/proj"), "proj".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+        });
+        app.pending_compute = None;
+        app
+    }
 
-        // Exclude the src directory, then also exclude main.rs inside it. Only the
-        // top-most excluded root (src) is subtracted, so the total stays at 200
-        // rather than underflowing to zero.
+    #[test]
+    fn re_including_a_file_keeps_only_that_exception_out_of_the_exclusion() {
+        let mut app = exclusion_app();
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1700);
+        assert_eq!(root_effective(&app, SubKey::Files), 3);
+
+        // Exclude the whole src directory: only README.md is left counted.
         select(&mut app, "src");
         app.update(Action::ToggleExclude);
-        app.update(Action::Expand); // reveal main.rs under the (excluded) src
+        assert_eq!(root_effective(&app, SubKey::Bytes), 200);
+        assert_eq!(root_effective(&app, SubKey::Files), 1);
+
+        // Re-include main.rs as an exception. src stays excluded (lib.rs with
+        // it), but main.rs counts again: 200 + 1000 bytes across 2 files.
+        app.update(Action::Expand); // reveal main.rs / lib.rs under src
+        select(&mut app, "main.rs");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1200);
+        assert_eq!(root_effective(&app, SubKey::Files), 2);
+        assert!(is_excluded(&app, "src"), "the directory stays excluded");
+        assert!(is_excluded(&app, "lib.rs"), "siblings stay excluded");
+        assert!(
+            !is_excluded(&app, "main.rs"),
+            "only the exception is included"
+        );
+
+        // Toggling main.rs again folds it back under src's exclusion.
         select(&mut app, "main.rs");
         app.update(Action::ToggleExclude);
         assert_eq!(root_effective(&app, SubKey::Bytes), 200);
         assert_eq!(root_effective(&app, SubKey::Files), 1);
+        assert!(is_excluded(&app, "main.rs"));
+    }
+
+    #[test]
+    fn un_excluding_a_directory_folds_a_lingering_exception_back_in() {
+        let mut app = exclusion_app();
+        select(&mut app, "src");
+        app.update(Action::ToggleExclude);
+        app.update(Action::Expand);
+        select(&mut app, "main.rs");
+        app.update(Action::ToggleExclude); // re-include main.rs as an exception
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1200);
+
+        // Re-include src itself. The whole subtree is counted again and the
+        // now-redundant main.rs exception is inert (it matches its parent state).
+        select(&mut app, "src");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1700);
+        assert_eq!(root_effective(&app, SubKey::Files), 3);
+        assert!(!is_excluded(&app, "src"));
+        assert!(!is_excluded(&app, "lib.rs"));
+        assert!(!is_excluded(&app, "main.rs"));
+    }
+
+    #[test]
+    fn exclusion_and_inclusion_alternate_down_the_tree() {
+        // /proj
+        //   a/               (excluded)
+        //     keep.rs   100   (excluded via a)
+        //     b/             (re-included exception)
+        //       inc.rs  10    (included via b)
+        //       c/           (excluded again)
+        //         deep.rs 1000 (excluded via c)
+        let files = vec![
+            (PathBuf::from("a/keep.rs"), 100),
+            (PathBuf::from("a/b/inc.rs"), 10),
+            (PathBuf::from("a/b/c/deep.rs"), 1000),
+        ];
+        let dirs = vec![
+            PathBuf::from("a"),
+            PathBuf::from("a/b"),
+            PathBuf::from("a/b/c"),
+        ];
+        let tree = build_skeleton(&files, &dirs, "proj".into());
+        let mut app = App::new(PathBuf::from("/proj"), "proj".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+        });
+        app.pending_compute = None;
+        app.update(Action::ExpandAll);
+
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1110);
+
+        // Exclude a → nothing under it counts.
+        select(&mut app, "a");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 0);
+
+        // Re-include a/b → inc.rs and (for now) deep.rs come back.
+        select(&mut app, "b");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 1010);
+
+        // Exclude a/b/c → deep.rs drops out again, leaving only inc.rs. The two
+        // nested exclusions (a, then c) must not double-count the shared subtree.
+        select(&mut app, "c");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Bytes), 10);
+        assert!(is_excluded(&app, "a"));
+        assert!(is_excluded(&app, "keep.rs"));
+        assert!(!is_excluded(&app, "b"));
+        assert!(!is_excluded(&app, "inc.rs"));
+        assert!(is_excluded(&app, "c"));
+        assert!(is_excluded(&app, "deep.rs"));
     }
 
     #[test]
