@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/getkono/tree-tui/compare/v0.1.2...v0.1.3) - 2026-07-02
+
+### Added
+
+- replace syntect/ratatui-image with karet-fileview for previews
+- show HEAD commit hash left of the header LOC summary
+- model exclusion as exclude + include exceptions
+- add exclude filter to adjust aggregate stats ([#37](https://github.com/getkono/tree-tui/pull/37))
+
+### Fixed
+
+- sort directories before files in the name sort order
+- advertise the r (reverse sort) key in the footer hint
+
+### Other
+
+- add a TUI preview to the README
+- add gen-svg script and wire up the svg task
+
 ## [0.1.2](https://github.com/getkono/tree-tui/compare/v0.1.1...v0.1.2) - 2026-06-24
 
 ### Added

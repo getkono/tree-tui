@@ -1,6 +1,6 @@
 [package]
 name = "tree-tui"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.90"                  # floor is set by the karet-fileview chain (edition 2024 + ratatui 0.30)
 description = "An interactive terminal UI for visualizing directories: code, size, and git stats."
