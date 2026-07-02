@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use karet_fileview::FileViewState;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::widgets::{Row, TableState};
-use ratatui_image::picker::Picker;
 
 use crate::action::{self, Action};
 use crate::collect::LayerResult;
@@ -15,7 +15,6 @@ use crate::model::{
     self, ChurnData, CodeData, Layer, Lens, NodeId, NodeKind, SortDir, StatusData, SubKey, Tree,
 };
 use crate::scan::ScanOutcome;
-use crate::ui::codeview::CodeView;
 use crate::ui::preview::Preview;
 use crate::ui::reader::{Handoff, Reader, ReaderExit};
 
@@ -23,6 +22,16 @@ use crate::ui::reader::{Handoff, Reader, ReaderExit};
 const WHEEL_TREE_ROWS: i64 = 1;
 /// Lines a scrollable view (preview / reader) moves per wheel notch.
 const WHEEL_PREVIEW_LINES: i32 = 3;
+
+/// Scroll a file view by `delta` rows (positive = down). Clamped to the document
+/// when the view is next rendered.
+fn scroll_view(state: &mut FileViewState, delta: i32) {
+    if delta >= 0 {
+        state.scroll_down(delta as u32);
+    } else {
+        state.scroll_up(delta.unsigned_abs());
+    }
+}
 
 /// Which pane receives Normal-mode navigation keys and is drawn focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -112,10 +121,9 @@ pub struct Loaded {
     /// The node whose preview is currently cached, to skip reloading on every
     /// frame; refreshed when the selection changes.
     pub preview_for: Option<NodeId>,
-    /// Cached preview content for the selected node.
+    /// Cached preview content (document, scroll state, yank text) for the
+    /// selected node.
     pub preview: Preview,
-    /// Scroll state for the text preview; rebuilt when the selection changes.
-    pub preview_view: CodeView,
     /// Which pane has keyboard focus (and the highlighted border).
     pub focus: Focus,
     /// Pane rectangles from the last render, for mouse hit-testing.
@@ -193,9 +201,6 @@ pub struct App {
     /// Short hash of the repository's current `HEAD`, shown in the header. `None`
     /// outside a git repository or on an unborn `HEAD`.
     pub head_hash: Option<String>,
-    /// Terminal image-protocol picker for the preview pane, probed once at
-    /// startup. `None` in tests and when the terminal can't be queried.
-    pub picker: Option<Picker>,
 }
 
 impl App {
@@ -214,7 +219,6 @@ impl App {
             pending_capture: None,
             repo: false,
             head_hash: None,
-            picker: None,
         }
     }
 
@@ -363,13 +367,12 @@ impl App {
 
     fn toggle_preview(&mut self) {
         let root = self.root.clone();
-        let picker = self.picker.as_ref();
         if let Screen::Loaded(loaded) = &mut self.screen {
             loaded.show_preview = !loaded.show_preview;
             // Paint the first preview immediately on enable; later selection
             // changes are debounced off the navigation hot path (event loop).
             if loaded.show_preview {
-                loaded.ensure_preview(&root, picker);
+                loaded.ensure_preview(&root);
             }
         }
     }
@@ -395,9 +398,8 @@ impl App {
     /// debounce timer so the file read + highlight never runs on a nav frame.
     pub fn refresh_preview(&mut self) {
         let root = self.root.clone();
-        let picker = self.picker.as_ref();
         if let Screen::Loaded(loaded) = &mut self.screen {
-            loaded.ensure_preview(&root, picker);
+            loaded.ensure_preview(&root);
         }
     }
 
@@ -419,7 +421,7 @@ impl App {
             return;
         };
         let text = match loaded.focus {
-            Focus::Preview => loaded.preview_view.visible_text(),
+            Focus::Preview => loaded.preview.yank.clone().unwrap_or_default(),
             Focus::Tree => loaded
                 .selected_id()
                 .map(|id| loaded.tree.nodes[id].rel_path.display().to_string())
@@ -446,7 +448,7 @@ impl App {
             Screen::Loaded(loaded) => match loaded.panes.hit(col, row) {
                 Some(Focus::Preview) => {
                     loaded.focus = Focus::Preview;
-                    loaded.preview_view.scroll_by(delta * WHEEL_PREVIEW_LINES);
+                    scroll_view(&mut loaded.preview.state, delta * WHEEL_PREVIEW_LINES);
                 }
                 Some(Focus::Tree) => {
                     loaded.focus = Focus::Tree;
@@ -586,7 +588,7 @@ impl App {
         let Screen::Loaded(loaded) = std::mem::replace(&mut self.screen, Screen::Loading) else {
             return; // unreachable: only called from the loaded screen
         };
-        let reader = Reader::open(loaded, path, self.picker.as_ref());
+        let reader = Reader::open(loaded, path);
         self.screen = Screen::Reader(Box::new(reader));
     }
 
@@ -640,8 +642,7 @@ impl Loaded {
             show_detail: false,
             show_preview: true,
             preview_for: None,
-            preview: Preview::Empty,
-            preview_view: CodeView::default(),
+            preview: Preview::default(),
             focus: Focus::Tree,
             panes: PaneRects::default(),
             filter: String::new(),
@@ -672,26 +673,22 @@ impl Loaded {
     /// Load the preview for the current selection if it isn't already cached.
     /// Called by the renderer only while the preview pane is visible, so the
     /// bounded file read happens lazily and at most once per selection.
-    pub fn ensure_preview(&mut self, root: &Path, picker: Option<&Picker>) {
+    pub fn ensure_preview(&mut self, root: &Path) {
         let id = self.selected_id();
         if id == self.preview_for {
             return;
         }
         self.preview_for = id;
+        // A fresh `Preview` also resets scroll state for the new content.
         self.preview = match id {
-            None => Preview::Empty,
+            None => Preview::default(),
             Some(id) if self.tree.nodes[id].is_dir() => {
-                Preview::Info(format!("{} — directory", self.display_name(id)))
+                Preview::note(format!("{} — directory", self.display_name(id)))
             }
             Some(id) => {
                 let path = root.join(&self.tree.nodes[id].rel_path);
-                crate::ui::preview::load(&path, picker)
+                crate::ui::preview::load(&path)
             }
-        };
-        // Reset the preview's scroll state for the new content.
-        self.preview_view = match &self.preview {
-            Preview::Text(lines) => CodeView::new(lines.clone()),
-            _ => CodeView::default(),
         };
     }
 
@@ -1093,15 +1090,20 @@ impl Loaded {
     /// was consumed (movement keys scroll the preview; anything else falls
     /// through to the tree).
     fn handle_preview_action(&mut self, action: Action) -> bool {
+        let state = &mut self.preview.state;
         match action {
-            Action::Down => self.preview_view.scroll_by(1),
-            Action::Up => self.preview_view.scroll_by(-1),
-            Action::PageDown => self.preview_view.page(1),
-            Action::PageUp => self.preview_view.page(-1),
-            Action::First => self.preview_view.goto_top(),
-            Action::Last => self.preview_view.goto_bottom(),
-            Action::Collapse => self.preview_view.scroll_h(-4),
-            Action::Expand => self.preview_view.scroll_h(4),
+            Action::Down => state.scroll_down(1),
+            Action::Up => state.scroll_up(1),
+            Action::PageDown => state.page_down(),
+            Action::PageUp => state.page_up(),
+            Action::First => state.scroll_to_top(),
+            Action::Last => {
+                let rows = self.preview.doc.as_ref().map_or(0, |d| d.row_count());
+                self.preview.state.scroll_down(rows as u32);
+            }
+            // The read-only view has no horizontal pan; swallow these so a
+            // preview-focused Collapse/Expand never drives the tree instead.
+            Action::Collapse | Action::Expand => {}
             _ => return false,
         }
         true

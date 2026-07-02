@@ -1,6 +1,5 @@
 //! Rendering: dispatch by screen state and lay out the top-level regions.
 
-pub mod codeview;
 mod detail;
 mod footer;
 mod header;
@@ -8,7 +7,6 @@ mod help;
 mod loading;
 pub mod preview;
 pub mod reader;
-mod syntax;
 pub mod theme;
 mod tree_view;
 
@@ -423,12 +421,14 @@ mod tests {
         // Inject a text preview, focus the preview pane, and pin the cache key so
         // the renderer's `ensure_preview` won't overwrite our injected content.
         if let Screen::Loaded(loaded) = &mut app.screen {
-            let lines = super::syntax::highlight(
-                "fn main() {}\nlet x = 1;\n",
+            let src = b"fn main() {}\nlet x = 1;\n";
+            let doc = karet_fileview::FileDoc::prepare(
                 std::path::Path::new("x.rs"),
+                src,
+                src.len() as u64,
+                &super::preview::preview_limits(),
             );
-            loaded.preview = super::preview::Preview::Text(lines.clone());
-            loaded.preview_view = super::codeview::CodeView::new(lines);
+            loaded.preview = super::preview::Preview::from_doc(doc);
             loaded.preview_for = loaded.selected_id();
             loaded.focus = Focus::Preview;
         }

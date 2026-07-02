@@ -38,6 +38,12 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
 - `event` — the `tokio::select!` loop: input, walk completion, lens results, spinner ticks.
 - `ui` — the render scaffold (header / tree table / detail / footer / help) driven by the active lens.
 
+File viewing is not part of the metric core: the inline **preview** pane (`ui::preview`) and the
+full-screen **reader** (`ui::reader`) both delegate rendering to the external **`karet-fileview`**
+widget — one `FileDoc::prepare` (classify + decode/parse/highlight, cached per selection) feeding a
+`FileView`/`FileViewState`. tree-tui keeps only the glue: bounded reads, scroll/search state, the
+`$EDITOR`/`$PAGER` handoffs, and the suspended-tree ownership.
+
 **Modular tools:**
 
 - **Collectors** (`collect::{walk, code, git}`) — independent data sources keyed by relative path.

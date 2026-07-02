@@ -1,152 +1,127 @@
 //! The side-by-side preview pane.
 //!
-//! Shows the selected file: syntax-highlighted text (bat-like) or an inline
-//! image where the terminal supports a graphics protocol. Content is read in a
-//! bounded prefix and cached on the [`Loaded`] state, refreshed only when the
-//! selection changes (see `Loaded::ensure_preview`).
+//! Shows the selected file through the `karet-fileview` widget: syntax-highlighted
+//! code (tree-sitter), an inline image (truecolor half-blocks), a hex dump for
+//! binaries, or a placeholder for PDFs / oversized / undecodable files. Content is
+//! prepared once from a bounded prefix and cached on the [`Loaded`] state, refreshed
+//! only when the selection changes (see `Loaded::ensure_preview`).
 
 use std::path::Path;
 
+use karet_fileview::{FileDoc, FileView, FileViewState, Limits};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Padding, Paragraph};
-use ratatui_image::StatefulImage;
-use ratatui_image::picker::Picker;
-use ratatui_image::protocol::StatefulProtocol;
+use ratatui::widgets::{Block, Paragraph};
 
-use super::{codeview, syntax, theme};
+use super::theme;
 use crate::app::{Focus, Loaded};
 
 /// Largest file we read for a text preview.
 const MAX_TEXT_BYTES: u64 = 256 * 1024;
-/// Largest number of lines we highlight.
+/// Above this many lines the text is rendered without highlighting so the pane
+/// opens instantly (the buffer itself is unaffected).
 const MAX_TEXT_LINES: usize = 500;
-/// Largest image file we decode.
-const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Size and highlight budgets for the inline preview: a small prefix and a low
+/// line budget for an instant, glance-sized open.
+#[must_use]
+pub fn preview_limits() -> Limits {
+    Limits::new(MAX_TEXT_BYTES, MAX_TEXT_LINES)
+}
 
 /// Cached preview content for the selected node.
 #[derive(Default)]
-pub enum Preview {
-    /// Nothing selected.
-    #[default]
-    Empty,
-    /// Syntax-highlighted text (already truncated).
-    Text(Vec<Line<'static>>),
-    /// A decoded image, resized to the pane on render.
-    Image(Box<StatefulProtocol>),
-    /// A short note: directory, binary, too large, unreadable, …
-    Info(String),
+pub struct Preview {
+    /// The prepared document, or `None` for a directory / unreadable selection.
+    pub doc: Option<FileDoc>,
+    /// A short note shown when there is no document (directory, read error).
+    pub note: Option<String>,
+    /// The previewed text (text/markdown only), kept for the `y` yank.
+    pub yank: Option<String>,
+    /// Scroll state for the view; reset when the selection changes.
+    pub state: FileViewState,
+}
+
+impl Preview {
+    /// A note-only preview (directory, read error): nothing scrollable to show.
+    pub fn note(message: String) -> Self {
+        Self {
+            note: Some(message),
+            ..Default::default()
+        }
+    }
+
+    /// A preview over an already-prepared document (used in tests).
+    #[cfg(test)]
+    pub fn from_doc(doc: FileDoc) -> Self {
+        Self {
+            doc: Some(doc),
+            note: None,
+            yank: None,
+            state: FileViewState::new(),
+        }
+    }
 }
 
 /// Build the preview for `path` (a file), reading at most a bounded prefix.
-pub fn load(path: &Path, picker: Option<&Picker>) -> Preview {
-    if image::ImageFormat::from_path(path).is_ok() {
-        load_image(path, picker)
-    } else {
-        load_text(path)
-    }
-}
-
-fn load_image(path: &Path, picker: Option<&Picker>) -> Preview {
-    match decode_image(path, picker) {
-        Ok(protocol) => Preview::Image(protocol),
-        Err(message) => Preview::Info(message),
-    }
-}
-
-/// Decode `path` into a resize protocol for inline display, or an explanatory
-/// message. Shared by the preview pane and the full-screen reader.
-pub(super) fn decode_image(
-    path: &Path,
-    picker: Option<&Picker>,
-) -> Result<Box<StatefulProtocol>, String> {
-    let Some(picker) = picker else {
-        return Err("image preview is not supported by this terminal".into());
+pub fn load(path: &Path) -> Preview {
+    let len = match std::fs::metadata(path) {
+        Ok(meta) => meta.len(),
+        Err(err) => return Preview::note(format!("cannot read file: {err}")),
     };
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.len() > MAX_IMAGE_BYTES => {
-            return Err(format!(
-                "image too large to preview ({})",
-                theme::human_bytes(meta.len())
-            ));
-        }
-        Ok(_) => {}
-        Err(err) => return Err(format!("cannot read image: {err}")),
+    let limits = preview_limits();
+    // Read a bounded prefix. For an oversized file this is just a head sample;
+    // `prepare` classifies it `TooLarge` from `len` without reading the body.
+    let bytes = match read_bounded(path, limits.max_bytes) {
+        Ok(bytes) => bytes,
+        Err(err) => return Preview::note(format!("cannot read file: {err}")),
+    };
+    let doc = FileDoc::prepare(path, &bytes, len, &limits);
+    // A text/markdown document exposes a language; keep its text for `y` yank.
+    let yank = doc
+        .language()
+        .is_some()
+        .then(|| String::from_utf8_lossy(&bytes).into_owned());
+    Preview {
+        doc: Some(doc),
+        note: None,
+        yank,
+        state: FileViewState::new(),
     }
-    let reader = image::ImageReader::open(path)
-        .and_then(|r| r.with_guessed_format())
-        .map_err(|err| format!("cannot read image: {err}"))?;
-    let img = reader
-        .decode()
-        .map_err(|err| format!("cannot decode image: {err}"))?;
-    Ok(Box::new(picker.new_resize_protocol(img)))
 }
 
-fn load_text(path: &Path) -> Preview {
+/// Read at most `max` bytes of `path`. Shared with the full-screen reader.
+pub(super) fn read_bounded(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(err) => return Preview::Info(format!("cannot read file: {err}")),
-    };
+    let file = std::fs::File::open(path)?;
     let mut buf = Vec::new();
-    if let Err(err) = file.take(MAX_TEXT_BYTES).read_to_end(&mut buf) {
-        return Preview::Info(format!("cannot read file: {err}"));
-    }
-    // A NUL byte in the prefix is a reliable "this is binary" signal.
-    if buf.contains(&0) {
-        return Preview::Info("binary file — no preview".into());
-    }
-    let text = String::from_utf8_lossy(&buf);
-    let mut truncated = String::new();
-    for line in text.lines().take(MAX_TEXT_LINES) {
-        truncated.push_str(line);
-        truncated.push('\n');
-    }
-    if truncated.trim().is_empty() {
-        return Preview::Info("empty file".into());
-    }
-    Preview::Text(syntax::highlight(&truncated, path))
+    file.take(max).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 /// Render the preview pane for the current selection into `area`.
 pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
     let focused = loaded.focus == Focus::Preview;
-
-    // Text scrolls through the shared code-view, which owns its own border.
-    if matches!(loaded.preview, Preview::Text(_)) {
-        codeview::render(frame, &mut loaded.preview_view, area, " preview ", focused);
-        return;
-    }
-
     let border = if focused { theme::ACCENT } else { theme::MUTED };
     let block = Block::bordered()
         .title(" preview ")
-        .border_style(Style::default().fg(border))
-        .padding(Padding::horizontal(1));
+        .border_style(Style::default().fg(border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    match &mut loaded.preview {
-        Preview::Empty | Preview::Text(_) => {}
-        Preview::Image(protocol) => {
-            frame.render_stateful_widget(
-                StatefulImage::<StatefulProtocol>::new(),
-                inner,
-                protocol.as_mut(),
-            );
-        }
-        Preview::Info(message) => {
-            let note = Paragraph::new(Line::from(Span::styled(
-                message.clone(),
-                Style::default()
-                    .fg(theme::MUTED)
-                    .add_modifier(Modifier::ITALIC),
-            )))
-            .alignment(Alignment::Center);
-            frame.render_widget(note, inner);
-        }
+    if let Some(doc) = &loaded.preview.doc {
+        // Disjoint borrows of `doc` (shared) and `state` (mutable).
+        frame.render_stateful_widget(FileView::new(doc), inner, &mut loaded.preview.state);
+    } else if let Some(note) = &loaded.preview.note {
+        let note = Paragraph::new(Line::from(Span::styled(
+            note.clone(),
+            Style::default()
+                .fg(theme::MUTED)
+                .add_modifier(Modifier::ITALIC),
+        )))
+        .alignment(Alignment::Center);
+        frame.render_widget(note, inner);
     }
 }
