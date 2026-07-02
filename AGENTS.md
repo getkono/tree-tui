@@ -12,6 +12,10 @@ full design.
 - **ignore** — `.gitignore`-aware filesystem walk; builds the tree skeleton + per-file size.
 - **tokei** — code line counting (the `code` lens collector).
 - **gix** — pure-Rust git; the `churn`/`status` lens collectors.
+- **karet-fileview** — read-only "render any file" widget (tree-sitter-highlighted code, inline
+  images, hex dumps, placeholders) behind one dispatch; powers the preview pane and the
+  full-screen reader (`src/ui/{preview,reader}.rs`). Git-pinned until the karet chain is on
+  crates.io — see the dependency note in `Cargo.toml`.
 - **color-eyre** / **eyre** — colorful error reports and panic hooks at the app boundary.
 - **thiserror** — derive typed error enums for the app's own error types.
 - **tracing** + **tracing-subscriber** — structured logging; pair with **tracing-appender**

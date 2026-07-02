@@ -76,14 +76,10 @@ async fn run(dir: PathBuf) -> color_eyre::Result<()> {
     tracing::info!(target = %root.display(), "tree starting");
 
     let mut app = App::new(root, label);
-    // Image picker for the preview pane. We deliberately do NOT use
-    // `Picker::from_query_stdio()`: it probes the terminal by writing queries and
-    // reading the replies straight from stdin at startup, which collides with
-    // crossterm's event reader and leaves the whole TUI unable to receive any
-    // key or mouse input. `halfblocks()` detects tmux/protocol from env vars
-    // only (no stdin), so input always works; images render as Unicode
-    // half-blocks, which any truecolor terminal supports.
-    app.picker = Some(ratatui_image::picker::Picker::halfblocks());
+    // Images in the preview / reader render through `karet-fileview`'s truecolor
+    // half-block backend (its `GraphicsProtocol::Halfblocks` default): env-only
+    // detection, no stdin probe, so it never collides with crossterm's event
+    // reader — the pitfall that made `ratatui-image`'s query picker freeze input.
     let mut terminal = tui::init()?;
     let result = event::run(&mut terminal, &mut app).await;
     tui::restore();

@@ -2,7 +2,7 @@
 name = "tree-tui"
 version = "0.1.2"
 edition = "2024"
-rust-version = "1.87"                  # uses u*::is_multiple_of (stable since 1.87)
+rust-version = "1.90"                  # floor is set by the karet-fileview chain (edition 2024 + ratatui 0.30)
 description = "An interactive terminal UI for visualizing directories: code, size, and git stats."
 authors = ["Justin Chung"]
 license = "MIT OR Apache-2.0"
@@ -31,18 +31,9 @@ ignore = "0.4"
 # Pure-Rust git (no external binary, no C toolchain) for the churn/status lenses.
 # Keep gix's defaults (they pull in the hash backend) and add what the lenses need.
 gix = { version = "0.85", features = ["revision", "blob-diff", "status", "dirwalk"] }
-# Image decoding for the preview pane (the same crate, and version, ratatui-image uses).
-image = "0.25"
-ratatui = "0.30.1"
-# Inline image preview. Disable the default `chafa` backend (it needs a system
-# library); the built-in kitty/iTerm/sixel/halfblock protocols cover us.
-ratatui-image = { version = "11.0.5", default-features = false, features = [
-    "crossterm",
-    "image-defaults",
-] }
-# Syntax highlighting for the text preview (bat-like). Use the pure-Rust
-# fancy-regex backend so there is no C oniguruma dependency.
-syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
+ratatui = "0.30.2"
+karet-fileview = { version = "0.1.0", features = ["all-languages"] }
+karet-core = "0.1.0"
 thiserror = "2.0.18"
 tokei = { version = "14", default-features = false }
 tokio = { version = "1.52.3", features = ["full"] }
