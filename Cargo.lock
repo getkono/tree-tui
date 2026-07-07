@@ -2456,12 +2456,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "karet-editor"
-version = "0.1.0"
+name = "karet-core"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "333657f4ed53ce2d7297d05f2d98f53710b6504c541356851124a41c66945659"
+checksum = "ceff3b5d56c0043707a688b88f1e247bc046c815cc2dfd83726f2f953d8c3987"
 dependencies = [
- "karet-core",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "karet-editor"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3043c9d60a1ea0f470fc12d48eed5c07fe3bdb01f98fa802814876d6582449a3"
+dependencies = [
+ "karet-core 0.2.0",
  "karet-syntax",
  "karet-text",
  "karet-theme",
@@ -2473,19 +2482,19 @@ dependencies = [
 
 [[package]]
 name = "karet-filetype"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50a7094e8c7fb46bf374d13bed74ce5dd5049910fd55a1b2bbc366fb9a90bd24"
+checksum = "624555d4d53f0c77b47c33d22a78d7512b6a482d64c5067ed7d694c76db4e18b"
 
 [[package]]
 name = "karet-fileview"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8746d5a6dea1392bd10665698ef25b8b530528fdcee482a76bad8df24aab72f"
+checksum = "5c12231938293d489e7b2494be9e2252844a6ef50de9f64725de0a75af49baab"
 dependencies = [
  "base64",
  "image",
- "karet-core",
+ "karet-core 0.2.0",
  "karet-editor",
  "karet-filetype",
  "karet-syntax",
@@ -2498,22 +2507,22 @@ dependencies = [
 
 [[package]]
 name = "karet-syntax"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de3c66fc432990fb8501c7daa7de81223f53ef8de1ca819751ab7189bb531041"
+checksum = "edce14adc3f1d2ea2bacced3608212486589691958e7b342ffa3139780aa6bb5"
 dependencies = [
- "karet-core",
+ "karet-core 0.2.0",
  "karet-treesitter",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "karet-text"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6573dca46ac2d8038e4d126f3e4dbd7231ca6a280e4f6700090b640c860858cb"
+checksum = "d69c9689360abbd3d7e1abe47404ff185b8297532d9f578ea336d5616ba729b9"
 dependencies = [
- "karet-core",
+ "karet-core 0.2.0",
  "memchr",
  "ropey",
  "smallvec",
@@ -2524,11 +2533,11 @@ dependencies = [
 
 [[package]]
 name = "karet-theme"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14e9391e03088634ad415755a5e470a6c048aed71c04433c70dbc7e0e7c61261"
+checksum = "77ebc8cf69e51ba046ed393d80967899f7c9141d369e87401382a4354ab0d1b7"
 dependencies = [
- "karet-core",
+ "karet-core 0.2.0",
  "palette",
  "ratatui",
  "thiserror 2.0.18",
@@ -2536,11 +2545,11 @@ dependencies = [
 
 [[package]]
 name = "karet-treesitter"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03716766c695fe671bf7d2f8d6f2b3581d45feebb8b40eb467b82f47e4b13973"
+checksum = "3645467f4852f6dcb36b81b99172bafc795039ca43d89f107bffa9dcc81359df"
 dependencies = [
- "karet-core",
+ "karet-core 0.2.0",
  "karet-filetype",
  "thiserror 2.0.18",
  "tree-sitter",
@@ -4583,7 +4592,7 @@ dependencies = [
  "futures",
  "gix",
  "ignore",
- "karet-core",
+ "karet-core 0.1.0",
  "karet-fileview",
  "notify-debouncer-full",
  "ratatui",

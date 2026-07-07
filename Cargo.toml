@@ -32,7 +32,7 @@ ignore = "0.4"
 # Keep gix's defaults (they pull in the hash backend) and add what the lenses need.
 gix = { version = "0.85", features = ["revision", "blob-diff", "status", "dirwalk"] }
 ratatui = "0.30.2"
-karet-fileview = { version = "0.1.0", features = ["all-languages"] }
+karet-fileview = { version = "0.2.0", features = ["all-languages"] }
 karet-core = "0.1.0"
 thiserror = "2.0.18"
 tokei = { version = "14", default-features = false }
