@@ -12,10 +12,14 @@ full design.
 - **ignore** — `.gitignore`-aware filesystem walk; builds the tree skeleton + per-file size.
 - **tokei** — code line counting (the `code` lens collector).
 - **gix** — pure-Rust git; the `churn`/`status` lens collectors.
-- **karet-fileview** — read-only "render any file" widget (tree-sitter-highlighted code, inline
-  images, hex dumps, placeholders) behind one dispatch; powers the preview pane and the
-  full-screen reader (`src/ui/{preview,reader}.rs`). Git-pinned until the karet chain is on
-  crates.io — see the dependency note in `Cargo.toml`.
+- **karet** — the toolkit behind the preview pane and the full-screen reader
+  (`src/ui/{preview,reader}.rs`). It ships pieces, not a finished file view:
+  **karet-fileview** has the read-only primitives (terminal images, hex dump, placeholder) plus
+  `classify`, **karet-editor** the read-only code editor, **karet-syntax**/**karet-treesitter**
+  the highlighting, **karet-filetype** the classification and the tree's icons, **karet-theme**
+  the colors, and **karet-pdf** the page rasterizer. Composing them into one "render any file"
+  widget is `src/ui/fileview.rs`'s job. All `karet-*` crates release in lockstep — bump them
+  together.
 - **color-eyre** / **eyre** — colorful error reports and panic hooks at the app boundary.
 - **thiserror** — derive typed error enums for the app's own error types.
 - **tracing** + **tracing-subscriber** — structured logging; pair with **tracing-appender**
@@ -30,6 +34,8 @@ for adding a lens or collector are in **`docs/ARCHITECTURE.md`**. Key modules:
 - `model::lens` — the `Lens`/`SubKey` enums (what each lens shows and how).
 - `model::build` — `build_skeleton` + the bottom-up `aggregate` folds.
 - `collect/` — the modular collectors (`walk`, `code`, `git`) and the lazy `compute` entry point.
+- `ui::fileview` — the classify-and-dispatch file view: `FileDoc::prepare` (once per file) plus
+  the per-frame `FileView`. Owns the highlight line budget and the Kitty image handshake.
 - `app` / `event` — state + reducer, and the lazy-compute engine (request → background collector →
   cache).
 

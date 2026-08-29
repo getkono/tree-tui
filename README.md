@@ -48,6 +48,10 @@ is instant, and you never pay for git history unless you ask for it.
 - **Declutter** — `z` hides rows that are zero under the active lens (e.g. non-code files in `code`).
 - **Filter** — live name filter that reveals matches together with their parent path.
 - **Detail panel** — a per-lens breakdown for the selected node with proportion bars and percentages.
+- **File-type icons** — every row carries a glyph for its type, in whichever tier your terminal can
+  render (`--icons nerd|unicode|ascii`).
+- **Preview & read anything** — highlighted code, inline images, PDF pages, or a hex dump, in a side
+  pane or a full-screen reader with search, folds, and soft wrap.
 - **Responsive** — columns drop gracefully as the terminal narrows; works on any Unicode terminal.
 
 ## Install
@@ -72,12 +76,17 @@ mise run install   # cargo install --path . --force  →  installs the `tree` bi
 ## Usage
 
 ```bash
-tree [dir]          # explore [dir] (default: .) through swappable lenses
-tree -V, --version  # print version + build info (commit, build time, profile, rustc, target)
-tree -h, --help     # print usage
+tree [dir]           # explore [dir] (default: .) through swappable lenses
+tree --icons <tier>  # glyph tier: nerd (default), unicode, or ascii
+tree -V, --version   # print version + build info (commit, build time, profile, rustc, target)
+tree -h, --help      # print usage
 ```
 
 The syntax is strict: at most one directory, no unknown flags. Anything else prints usage and exits 2.
+
+`--icons` defaults to **nerd**, which needs a [Nerd Font](https://www.nerdfonts.com); without one,
+use `--icons unicode` (geometric glyphs, no font support needed) or `--icons ascii`. Set
+`TREE_TUI_ICONS` to make the choice stick.
 
 ### Keybindings
 
@@ -100,6 +109,12 @@ The syntax is strict: at most one directory, no unknown flags. Anything else pri
 | `/` | filter by name (`Esc` clears) |
 | `?` | toggle help |
 | `q` / `Ctrl-c` | quit |
+
+In the full-screen reader (`Enter` on a file), `/` and `n` search, `:` and `<n>G` go to a line,
+`w` toggles soft wrap, and `za` / `zM` / `zR` fold the region under the top line, everything, or
+nothing — folding everything turns the reader into an outline of the file. Images and PDF pages
+render inline through the Kitty graphics protocol where the terminal supports it, and as truecolor
+half-blocks where it doesn't.
 
 ### Logging
 
@@ -129,6 +144,7 @@ or a collector.
 - **Language:** Rust (edition 2024)
 - **TUI:** ratatui + crossterm · **Async:** tokio
 - **Walk:** ignore · **Code stats:** tokei · **Git:** gix (pure-Rust)
+- **File view:** karet (fileview, editor, syntax, treesitter, filetype, theme, pdf)
 - **Errors:** color-eyre / eyre, thiserror · **Logging:** tracing + tracing-appender
 - **Tooling & tasks:** mise · **Git hooks:** hk
 
