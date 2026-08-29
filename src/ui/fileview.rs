@@ -92,16 +92,21 @@ impl Limits {
     }
 }
 
+/// The parsed text branch: a read-only buffer plus its (possibly empty) syntax
+/// model. Boxed inside [`Content`] — it is by far the largest payload, and every
+/// [`FileDoc`] would otherwise carry its size.
+struct TextContent {
+    buffer: TextBuffer,
+    highlights: Highlights,
+    blocks: SemanticBlocks,
+    folds: FoldRegions,
+    language: &'static str,
+}
+
 /// The prepared, owned payload for each renderable branch.
 enum Content {
-    /// Text/Markdown: a read-only buffer plus its (possibly empty) syntax model.
-    Text {
-        buffer: TextBuffer,
-        highlights: Highlights,
-        blocks: SemanticBlocks,
-        folds: FoldRegions,
-        language: &'static str,
-    },
+    /// Text/Markdown.
+    Text(Box<TextContent>),
     /// A decoded raster image.
     #[cfg(feature = "images")]
     Image(image::Image),
@@ -185,7 +190,7 @@ impl FileDoc {
     #[must_use]
     pub fn language(&self) -> Option<&'static str> {
         match &self.content {
-            Content::Text { language, .. } => Some(language),
+            Content::Text(text) => Some(text.language),
             _ => None,
         }
     }
@@ -195,7 +200,7 @@ impl FileDoc {
     #[must_use]
     pub fn row_count(&self) -> usize {
         match &self.content {
-            Content::Text { buffer, .. } => buffer.line_count(),
+            Content::Text(text) => text.buffer.line_count(),
             Content::Binary(bytes) => bytes.len().div_ceil(HEX_ROW_WIDTH),
             _ => 0,
         }
@@ -216,7 +221,7 @@ impl FileDoc {
     #[must_use]
     pub fn fold_regions(&self) -> Option<&FoldRegions> {
         match &self.content {
-            Content::Text { folds, .. } => Some(folds),
+            Content::Text(text) => Some(&text.folds),
             _ => None,
         }
     }
@@ -233,13 +238,13 @@ fn prepare_text(path: &Path, bytes: &[u8], limits: &Limits) -> Content {
     } else {
         Default::default()
     };
-    Content::Text {
+    Content::Text(Box::new(TextContent {
         buffer,
         highlights,
         blocks,
         folds,
         language,
-    }
+    }))
 }
 
 /// Parse `text` for `path`'s language and derive its highlights, semantic blocks,
@@ -462,16 +467,11 @@ impl StatefulWidget for FileView<'_> {
         state.pending_image = None;
 
         match &self.doc.content {
-            Content::Text {
-                buffer,
-                highlights,
-                blocks,
-                ..
-            } => {
-                Editor::new(buffer)
+            Content::Text(text) => {
+                Editor::new(&text.buffer)
                     .theme(self.theme)
-                    .highlights(highlights)
-                    .semantic_blocks(blocks)
+                    .highlights(&text.highlights)
+                    .semantic_blocks(&text.blocks)
                     .decorations(self.decorations)
                     .folds(self.folds)
                     .word_wrap(self.word_wrap)
@@ -538,47 +538,90 @@ impl StatefulWidget for FileView<'_> {
     }
 }
 
-/// Transmit the Kitty image reserved by the last [`FileView`] render to `out`.
+/// What a frame reserved for a Kitty placement.
 ///
-/// Call once per frame, **after** `terminal.draw(...)`, and use the returned flag
-/// to decide whether a [`clear_kitty_images`] is owed: `false` means the frame
-/// reserved nothing, so an image transmitted earlier is still on screen and has
-/// to be cleared. The half-block path and every non-image branch reserve nothing.
+/// A placement persists in the terminal until it is deleted — repainting the
+/// cells beneath it does nothing — so an unchanged one must **not** be
+/// retransmitted. Comparing this key across frames is what makes that safe: a
+/// full-page PDF is megabytes of escape payload, and the spinner alone would
+/// otherwise re-send it eight times a second.
+#[cfg(feature = "raster")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placement {
+    rect: Rect,
+    path: PathBuf,
+    /// The file's length, so a file replaced in place is redrawn.
+    len: u64,
+    /// The PDF page on screen; always 0 for a raster image.
+    page: usize,
+}
+
+/// Bring the terminal's Kitty placement in line with what the last frame drew.
+///
+/// Call once per frame, **after** `terminal.draw(...)`, passing whatever file
+/// view was rendered (`None` when the frame showed no file at all). `shown`
+/// carries the placement currently on the terminal across calls: a new one is
+/// transmitted, an unchanged one is left alone, and one that has gone away is
+/// deleted — which is the only way an image stops being visible, since it does
+/// not live in the cell buffer.
+///
+/// A no-op without the Kitty protocol: the half-block path paints into the
+/// buffer like any other widget and reserves nothing.
 ///
 /// # Errors
 /// Propagates any write/flush error from `out`.
 #[cfg(feature = "raster")]
-pub fn flush_kitty_image(
-    doc: &FileDoc,
-    state: &FileViewState,
+pub fn sync_kitty_image(
+    view: Option<(&FileDoc, &FileViewState)>,
+    shown: &mut Option<Placement>,
     out: &mut impl Write,
-) -> io::Result<bool> {
-    // The pixels live either directly on the document (a raster image) or in the
-    // per-view cache (a rasterized PDF page). The explicit type keeps a
-    // `raster`-only build (neither arm compiled) inferrable.
-    let img: Option<&image::Image> = match &doc.content {
-        #[cfg(feature = "images")]
-        Content::Image(img) => Some(img),
-        #[cfg(feature = "pdf")]
-        Content::Document { .. } => state.rendered.as_ref().map(|(_, img)| img),
-        _ => None,
-    };
-    let (Some(rect), Some(img)) = (state.pending_image, img) else {
-        return Ok(false);
-    };
-    write!(out, "{}", image::kitty_delete_all())?;
-    // Position the cursor at the reserved rect's top-left (VT coords are 1-based).
-    write!(out, "\x1b[{};{}H", rect.y + 1, rect.x + 1)?;
-    write!(out, "{}", img.kitty_escape(rect.width, rect.height))?;
-    out.flush()?;
-    Ok(true)
+) -> io::Result<()> {
+    let next = view.and_then(|(doc, state)| {
+        // The pixels live either directly on the document (a raster image) or in
+        // the per-view cache (a rasterized PDF page). The explicit type keeps a
+        // `raster`-only build (neither arm compiled) inferrable.
+        let img: Option<&image::Image> = match &doc.content {
+            #[cfg(feature = "images")]
+            Content::Image(img) => Some(img),
+            #[cfg(feature = "pdf")]
+            Content::Document { .. } => state.rendered.as_ref().map(|(_, img)| img),
+            _ => None,
+        };
+        let placement = Placement {
+            rect: state.pending_image?,
+            path: doc.path.clone(),
+            len: doc.len,
+            page: state.doc_page,
+        };
+        Some((placement, img?))
+    });
+
+    match next {
+        // Already on screen, pixel for pixel: sending it again would only cost
+        // the terminal a decode.
+        Some((placement, _)) if Some(&placement) == shown.as_ref() => Ok(()),
+        Some((placement, img)) => {
+            let rect = placement.rect;
+            write!(out, "{}", image::kitty_delete_all())?;
+            // Put the cursor at the reserved rect's top-left (VT coords are 1-based).
+            write!(out, "\x1b[{};{}H", rect.y + 1, rect.x + 1)?;
+            write!(out, "{}", img.kitty_escape(rect.width, rect.height))?;
+            out.flush()?;
+            *shown = Some(placement);
+            Ok(())
+        }
+        None if shown.is_some() => {
+            *shown = None;
+            clear_kitty_images(out)
+        }
+        None => Ok(()),
+    }
 }
 
-/// Clear every image this process transmitted through the Kitty protocol.
+/// Delete every image this process transmitted through the Kitty protocol.
 ///
-/// Called when the pane that held an image stops showing one — a new selection, a
-/// reader opening or closing, teardown — so a transmitted placement can't survive
-/// on top of later frames.
+/// Used on teardown, where there is no placement state left to track — leaving
+/// one behind would strand it on the shell the user returns to.
 #[cfg(feature = "raster")]
 pub fn clear_kitty_images(out: &mut impl Write) -> io::Result<()> {
     write!(out, "{}", image::kitty_delete_all())?;
@@ -608,9 +651,10 @@ mod tests {
         assert_eq!(doc.kind, FileKind::Text);
         assert_eq!(doc.language(), Some("Rust"));
         assert_eq!(doc.row_count(), 2);
-        let Content::Text { highlights, .. } = &doc.content else {
+        let Content::Text(text) = &doc.content else {
             panic!("expected the text branch");
         };
+        let highlights = &text.highlights;
         assert!(
             !highlights.all().is_empty(),
             "the bundled rust grammar should yield highlight spans"
@@ -622,9 +666,10 @@ mod tests {
         let src = "fn a() {}\n".repeat(10);
         let limits = Limits::new(karet_filetype::SIZE_GUARD, 3);
         let doc = FileDoc::prepare(Path::new("a.rs"), src.as_bytes(), src.len() as u64, &limits);
-        let Content::Text { highlights, .. } = &doc.content else {
+        let Content::Text(text) = &doc.content else {
             panic!("expected the text branch");
         };
+        let highlights = &text.highlights;
         assert!(
             highlights.all().is_empty(),
             "over-budget text must render unhighlighted"
@@ -641,9 +686,10 @@ mod tests {
             &Limits::default(),
         );
         assert_eq!(doc.kind, FileKind::Markdown);
-        let Content::Text { highlights, .. } = &doc.content else {
+        let Content::Text(text) = &doc.content else {
             panic!("expected the text branch");
         };
+        let highlights = &text.highlights;
         // The layered parse reaches into the fence: spans land past the fence open.
         let fence_body = src.find("fn main").expect("fence body");
         assert!(
@@ -762,12 +808,33 @@ trailer<</Size 4/Root 1 0 R>>\n%%EOF";
             .graphics(GraphicsProtocol::Kitty)
             .render(area, &mut buf, &mut state);
         assert!(state.pending_image.is_some(), "expected a reserved rect");
+
+        let mut shown = None;
         let mut out = Vec::new();
-        let drew = flush_kitty_image(&doc, &state, &mut out).expect("a Vec never fails");
-        assert!(drew, "a reserved page should flush");
+        sync_kitty_image(Some((&doc, &state)), &mut shown, &mut out).expect("a Vec never fails");
+        assert!(shown.is_some(), "the placement should be recorded");
         assert!(
             String::from_utf8_lossy(&out).contains("\x1b_G"),
             "expected a Kitty graphics escape"
+        );
+
+        // The same placement again must cost nothing: the image is still there,
+        // and a PDF page is megabytes of payload.
+        let mut again = Vec::new();
+        sync_kitty_image(Some((&doc, &state)), &mut shown, &mut again).expect("a Vec never fails");
+        assert!(
+            again.is_empty(),
+            "an unchanged placement must not retransmit"
+        );
+
+        // Nothing on screen: the placement has to be deleted, since repainting
+        // the cells underneath would leave it visible.
+        let mut cleared = Vec::new();
+        sync_kitty_image(None, &mut shown, &mut cleared).expect("a Vec never fails");
+        assert!(shown.is_none());
+        assert!(
+            String::from_utf8_lossy(&cleared).contains("\x1b_Ga=d"),
+            "expected a Kitty delete-all"
         );
     }
 
@@ -793,9 +860,10 @@ trailer<</Size 4/Root 1 0 R>>\n%%EOF";
         let doc = FileDoc::prepare(Path::new("a.rs"), b"fn main() {}\n", 13, &Limits::default());
         let mut state = FileViewState::new();
         let _ = render(&doc, Rect::new(0, 0, 30, 4), &mut state);
+        let mut shown = None;
         let mut out = Vec::new();
-        let drew = flush_kitty_image(&doc, &state, &mut out).expect("a Vec never fails");
-        assert!(!drew, "the text branch reserves nothing");
+        sync_kitty_image(Some((&doc, &state)), &mut shown, &mut out).expect("a Vec never fails");
+        assert!(shown.is_none(), "the text branch reserves nothing");
         assert!(out.is_empty(), "the text branch must not flush escapes");
     }
 }

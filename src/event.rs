@@ -138,16 +138,18 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
 /// Terminal-graphics state carried between frames.
 ///
 /// Kitty placements live outside the ratatui buffer, so redrawing the cells under
-/// one does not remove it. Tracking whether the previous frame drew one lets the
-/// first frame that doesn't clear it — otherwise an image would survive on top of
-/// the tree after the selection moves off the file that showed it.
+/// one neither removes nor refreshes it. Remembering the placement lets the first
+/// frame that stops showing an image delete it, and every frame that shows the
+/// same one skip retransmitting it — the spinner ticks at 120 ms, and a PDF page
+/// is megabytes of escape payload.
 ///
 /// Without the `raster` feature nothing is ever transmitted, so there is nothing
 /// to remember.
 #[derive(Default)]
 struct KittyImages {
+    /// The placement currently on the terminal, if any.
     #[cfg(feature = "raster")]
-    shown: bool,
+    shown: Option<fileview::Placement>,
 }
 
 /// Render one frame, then transmit or clear the terminal-graphics image that goes
@@ -159,17 +161,11 @@ fn draw(
 ) -> color_eyre::Result<()> {
     terminal.draw(|frame| ui::render(frame, app))?;
     #[cfg(feature = "raster")]
-    {
-        let mut out = std::io::stdout();
-        let drew = match app.active_file_view() {
-            Some((doc, state)) => fileview::flush_kitty_image(doc, state, &mut out)?,
-            None => false,
-        };
-        if !drew && kitty.shown {
-            fileview::clear_kitty_images(&mut out)?;
-        }
-        kitty.shown = drew;
-    }
+    fileview::sync_kitty_image(
+        app.active_file_view(),
+        &mut kitty.shown,
+        &mut std::io::stdout(),
+    )?;
     #[cfg(not(feature = "raster"))]
     let _ = kitty;
     Ok(())
