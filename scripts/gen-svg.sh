@@ -15,6 +15,12 @@
 # faithfully, so there is no palette remapping to do (contrast the 16-colour
 # ANSI case); we just set the window background to Mocha's base (#1e1e2e).
 #
+# The screenshot runs with `--icons unicode` rather than the default Nerd Font
+# tier: the SVG is typeset in plain JetBrains Mono, which has no Nerd Font
+# glyphs, so the default would render as tofu for everyone reading the README.
+# The Unicode tier is the one that renders anywhere, which is exactly what a
+# screenshot has to do.
+#
 # Idempotent: re-runs overwrite assets/tree.svg in place. The screenshot points
 # tree at this repo, so its contents track the repo.
 #
@@ -77,7 +83,7 @@ tmux set-option -t "$SESS" -ga terminal-features ",*:RGB"
 # Point tree at the repo itself: reproducible for any contributor, and — being a
 # git repo — it lights up all four lenses. `exec` replaces the shell so the pane
 # is pure TUI; COLORTERM asks the TUI for truecolour output.
-tmux send-keys -t "$SESS" "cd '$REPO_ROOT' && COLORTERM=truecolor exec '$BIN' ." Enter
+tmux send-keys -t "$SESS" "cd '$REPO_ROOT' && COLORTERM=truecolor exec '$BIN' --icons unicode ." Enter
 
 # --- Wait for the walk + first (code) lens layer to finish ---
 # The footer hint ("q quit") shows only once loaded and not mid-compute, so its
