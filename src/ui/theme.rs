@@ -2,6 +2,8 @@
 
 use std::sync::OnceLock;
 
+use karet_filetype::IconStyle;
+
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use tokei::LanguageType;
@@ -19,10 +21,40 @@ pub fn editor_theme() -> &'static karet_theme::Theme {
     THEME.get_or_init(karet_theme::Theme::dark)
 }
 
-// Tree glyphs (Unicode, renders everywhere).
-pub const GLYPH_EXPANDED: &str = "▾";
-pub const GLYPH_COLLAPSED: &str = "▸";
-pub const GLYPH_FILE: &str = "•";
+/// The glyph tier the tree draws with, resolved once from `--icons` /
+/// `TREE_TUI_ICONS`.
+static ICONS: OnceLock<IconStyle> = OnceLock::new();
+
+/// Fix the glyph tier for the process. Called once from `main`, before the first
+/// frame; a later call is ignored, and never reaching it leaves the default.
+pub fn set_icon_style(style: IconStyle) {
+    let _ = ICONS.set(style);
+}
+
+/// The active glyph tier (Nerd Font unless `main` chose otherwise).
+pub fn icon_style() -> IconStyle {
+    *ICONS.get_or_init(IconStyle::default)
+}
+
+/// The glyphs for a directory row in `style`: the chevron, plus the folder icon
+/// where the tier has one (Nerd Font only — the chevron alone marks a directory
+/// in the portable tiers, so those stay two columns narrower).
+///
+/// The style is a parameter rather than a read of [`icon_style`] so the tiers can
+/// be exercised without the process-wide one, which a test cannot set reliably.
+pub fn dir_glyphs(open: bool, style: IconStyle) -> String {
+    let chevron = karet_filetype::chevron(open, style);
+    match karet_filetype::directory_icon(open, style) {
+        Some(folder) => format!("{chevron} {folder}"),
+        None => chevron.to_string(),
+    }
+}
+
+/// The per-file-type glyph for `path` in `style`. Blank in the ASCII tier, which
+/// marks only directories.
+pub fn file_glyph(path: &std::path::Path, style: IconStyle) -> char {
+    karet_filetype::icon_for_path(path, style)
+}
 
 /// Braille spinner frames for the loading screen.
 pub const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -263,5 +295,52 @@ pub fn tint_color(tint: Tint) -> Option<Color> {
         Tint::Del => Some(DEL),
         Tint::Status => Some(STATUS),
         Tint::Plain => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    /// The portable tier must stay portable: nothing outside ASCII, so a terminal
+    /// with no font support still gets a legible tree.
+    #[test]
+    fn the_ascii_tier_is_pure_ascii() {
+        for open in [true, false] {
+            let glyphs = dir_glyphs(open, IconStyle::Ascii);
+            assert!(glyphs.is_ascii(), "directory glyphs: {glyphs:?}");
+        }
+        for name in [
+            "main.rs",
+            "notes.md",
+            "Cargo.toml",
+            "logo.png",
+            "no-extension",
+        ] {
+            let glyph = file_glyph(Path::new(name), IconStyle::Ascii);
+            assert!(glyph.is_ascii(), "{name} glyph: {glyph:?}");
+        }
+    }
+
+    /// Each tier is distinguishable, and only Nerd Font adds a folder beside the
+    /// chevron — the portable tiers stay narrower.
+    #[test]
+    fn only_the_nerd_font_tier_draws_a_folder() {
+        let nerd = dir_glyphs(true, IconStyle::NerdFont);
+        let unicode = dir_glyphs(true, IconStyle::Unicode);
+        let ascii = dir_glyphs(true, IconStyle::Ascii);
+        assert_eq!(nerd.chars().count(), 3, "chevron, space, folder: {nerd:?}");
+        assert_eq!(unicode.chars().count(), 1, "chevron only: {unicode:?}");
+        assert_eq!(ascii.chars().count(), 1, "chevron only: {ascii:?}");
+    }
+
+    /// A file's glyph follows its type, not just its name.
+    #[test]
+    fn file_glyphs_distinguish_types() {
+        let rust = file_glyph(Path::new("main.rs"), IconStyle::Unicode);
+        let image = file_glyph(Path::new("logo.png"), IconStyle::Unicode);
+        assert_ne!(rust, image, "code and image should not share a glyph");
     }
 }

@@ -257,8 +257,9 @@ fn num_cell(
     Cell::from(Line::from(Span::styled(text, style)).alignment(Alignment::Right))
 }
 
-/// Render a row's name column: indentation, glyph, then `name` (the concatenated
-/// chain for a directory row, the file name otherwise).
+/// Render a row's name column: indentation, the glyphs for the active icon tier,
+/// then `name` (the concatenated chain for a directory row, the file name
+/// otherwise).
 fn name_spans(
     node: &TreeNode,
     name: &str,
@@ -268,13 +269,8 @@ fn name_spans(
     let mut spans = vec![Span::raw("  ".repeat(indent))];
     match node.kind {
         NodeKind::Dir => {
-            let glyph = if node.expanded {
-                theme::GLYPH_EXPANDED
-            } else {
-                theme::GLYPH_COLLAPSED
-            };
             spans.push(Span::styled(
-                format!("{glyph} "),
+                format!("{} ", theme::dir_glyphs(node.expanded, theme::icon_style())),
                 Style::default().fg(theme::DIR),
             ));
             spans.push(Span::styled(
@@ -285,7 +281,10 @@ fn name_spans(
         NodeKind::File => {
             let color = primary_lang.map_or(theme::MUTED, theme::language_color);
             spans.push(Span::styled(
-                format!("{} ", theme::GLYPH_FILE),
+                format!(
+                    "{} ",
+                    theme::file_glyph(&node.rel_path, theme::icon_style())
+                ),
                 Style::default().fg(color),
             ));
             spans.push(Span::raw(name.to_string()));
