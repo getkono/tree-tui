@@ -36,7 +36,19 @@ pub fn init() -> std::io::Result<DefaultTerminal> {
 }
 
 /// Leave raw mode + the alternate screen.
+///
+/// Kitty graphics placements are not part of the alternate screen's cell buffer,
+/// so any image the file view transmitted has to be deleted explicitly or it
+/// survives on the shell the user comes back to.
 pub fn restore() {
+    #[cfg(feature = "raster")]
+    {
+        use std::io::Write;
+
+        let mut out = std::io::stdout();
+        let _ = crate::ui::fileview::clear_kitty_images(&mut out);
+        let _ = out.flush();
+    }
     let _ = set_mouse_capture(false);
     pop_keyboard_enhancement();
     ratatui::restore();

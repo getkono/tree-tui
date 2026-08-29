@@ -1,31 +1,33 @@
 //! The full-screen, read-only file reader.
 //!
 //! Opened with `Enter` on a file, it replaces `$PAGER` with an in-TUI view built
-//! on the `karet-fileview` widget: tree-sitter-highlighted code, inline images,
-//! a hex dump for binaries, or a placeholder for PDFs / oversized files — with
+//! on the [`FileView`] widget: tree-sitter-highlighted code, inline images, PDF
+//! pages, a hex dump for binaries, or a placeholder for oversized files — with
 //! scroll, search, goto-line, and a line-number gutter. Editing stays delegated
 //! to `$EDITOR` (`e`), and `$PAGER` survives as an explicit escape hatch (`P`).
 //!
+//! Beyond paging it borrows what the read-only editor already offers: soft
+//! wrapping (`w`), sticky headers that pin the enclosing scopes above the
+//! viewport, and folding (`za` at the top line, `zM`/`zR` for all) — folding
+//! everything turns the reader into an instant outline of the file.
+//!
 //! The reader owns the suspended [`Loaded`] tree and hands it back on exit, so
 //! all tree state (expansion, selection, sort, lens, cached layers) is preserved.
-//!
-//! `FileViewState` hides its scroll position, so the reader keeps a shadow [`top`]
-//! (the viewport's first visible row) in lockstep with it — that mirror is what
-//! the title bar, edit-at-line, and half-page scrolling read.
-//!
-//! [`top`]: Reader::top
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use karet_core::{Decoration, DecorationKind, LineCol, Range, ThemeRole};
-use karet_fileview::{FileDoc, FileView, FileViewState, Limits};
+use karet_editor::{Fold, resolve_folds};
+use karet_filetype::WrapMode;
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+use super::fileview::{self, FileDoc, FileView, FileViewState, Limits};
 use super::preview::read_bounded;
 use super::theme;
 use crate::app::Loaded;
@@ -38,7 +40,8 @@ const MAX_READER_BYTES: u64 = 4 * 1024 * 1024;
 const HIGHLIGHT_LINE_BUDGET: usize = 20_000;
 
 /// Footer key hints when no prompt is active.
-const HINTS: &str = "j/k scroll · /n search · :goto · y copy · e edit · P pager · q back";
+const HINTS: &str =
+    "j/k scroll · /n search · :goto · w wrap · za fold · y copy · e edit · P pager · q back";
 
 /// Size and highlight budgets for the full-file reader.
 fn reader_limits() -> Limits {
@@ -90,12 +93,10 @@ pub struct Reader {
     state: FileViewState,
     /// The file's text (text/markdown only), for search and the `y` yank.
     text: Option<String>,
-    /// Shadow of the viewport's first visible row, kept in lockstep with
-    /// [`state`](Self::state) so the title, edit-at-line, and half-page scroll can
-    /// read the position `FileViewState` otherwise hides.
-    top: u32,
-    /// Body height captured at the last render, for half-page + centering.
-    page_rows: u16,
+    /// Whether long lines soft-wrap; seeded from the file type's default.
+    word_wrap: bool,
+    /// Header lines of the currently collapsed fold regions.
+    folded: BTreeSet<u32>,
     pub search: Option<Search>,
     /// Search-match line highlights, passed to the view each frame.
     decorations: Vec<Decoration>,
@@ -106,6 +107,8 @@ pub struct Reader {
     count: String,
     /// Whether a `g` is waiting for the second `g` of `gg`.
     pending_g: bool,
+    /// Whether a `z` is waiting for the fold command that follows it.
+    pending_z: bool,
 }
 
 impl Reader {
@@ -121,6 +124,10 @@ impl Reader {
             .language()
             .is_some()
             .then(|| String::from_utf8_lossy(&bytes).into_owned());
+        let word_wrap = matches!(
+            karet_filetype::file_type_for_path(&path).wrap_mode(),
+            WrapMode::Wrap
+        );
         Self {
             loaded,
             path,
@@ -128,15 +135,75 @@ impl Reader {
             doc,
             state: FileViewState::new(),
             text,
-            top: 0,
-            page_rows: 1,
+            word_wrap,
+            folded: BTreeSet::new(),
             search: None,
             decorations: Vec::new(),
             prompt: Prompt::None,
             pending_handoff: None,
             count: String::new(),
+            pending_z: false,
             pending_g: false,
         }
+    }
+
+    /// Whether the document pages rather than scrolls — a PDF, whose pages the
+    /// scroll keys step through one at a time.
+    fn is_paged(&self) -> bool {
+        self.doc.page_count().is_some()
+    }
+
+    /// The document and view state behind the body, for the post-draw Kitty flush.
+    #[cfg(feature = "raster")]
+    pub(crate) fn file_view(&self) -> (&FileDoc, &FileViewState) {
+        (&self.doc, &self.state)
+    }
+
+    /// The viewport's first visible row (text line or hex row).
+    fn top(&self) -> u32 {
+        self.state.top()
+    }
+
+    /// The body height captured at the last render.
+    fn page_rows(&self) -> u16 {
+        self.state.page_rows()
+    }
+
+    /// The fold list handed to the widget: every region the document has, tagged
+    /// with whether it is currently collapsed.
+    fn folds(&self) -> Vec<Fold> {
+        self.doc
+            .fold_regions()
+            .map(|regions| resolve_folds(regions, &self.folded))
+            .unwrap_or_default()
+    }
+
+    /// Toggle the fold whose header is the viewport's top line. The reader has no
+    /// cursor, so the top line is what `za` acts on.
+    fn toggle_fold(&mut self) {
+        let Some(regions) = self.doc.fold_regions() else {
+            return;
+        };
+        let top = self.top();
+        if !regions.regions().iter().any(|region| region.start == top) {
+            return;
+        }
+        if !self.folded.remove(&top) {
+            self.folded.insert(top);
+        }
+    }
+
+    /// Collapse every fold region (`zM`) — an instant outline of the file — or
+    /// open them all again (`zR`).
+    fn fold_all(&mut self, collapsed: bool) {
+        self.folded = if collapsed {
+            self.doc
+                .fold_regions()
+                .map(|regions| regions.regions().iter().map(|r| r.start).collect())
+                .unwrap_or_default()
+        } else {
+            BTreeSet::new()
+        };
     }
 
     /// Handle a key. Returns whether to stay or return to the tree.
@@ -154,6 +221,17 @@ impl Reader {
             return ReaderExit::Stay;
         }
 
+        // `z` prefixes the fold commands: `za` toggles here, `zM`/`zR` all.
+        if std::mem::take(&mut self.pending_z) {
+            match key.code {
+                KeyCode::Char('a') => self.toggle_fold(),
+                KeyCode::Char('M') => self.fold_all(true),
+                KeyCode::Char('R') => self.fold_all(false),
+                _ => {}
+            }
+            return ReaderExit::Stay;
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return ReaderExit::ToTree,
@@ -165,6 +243,8 @@ impl Reader {
             KeyCode::PageUp | KeyCode::Char('b') => self.page(-1),
             KeyCode::Char('G') | KeyCode::End => self.goto_bottom_or_count(),
             KeyCode::Char('g') => self.pending_g = true,
+            KeyCode::Char('z') => self.pending_z = true,
+            KeyCode::Char('w') => self.word_wrap = !self.word_wrap,
             KeyCode::Char('/') => self.prompt = Prompt::Search(String::new()),
             KeyCode::Char(':') => self.prompt = Prompt::Goto(String::new()),
             KeyCode::Char('n') => self.search_step(1),
@@ -187,32 +267,34 @@ impl Reader {
         (self.doc.row_count() as u32).saturating_sub(1)
     }
 
-    /// Move the viewport's top to `line` (clamped to the document), keeping
-    /// [`state`](Self::state) and the [`top`](Self::top) shadow in sync.
+    /// Move the viewport's top to `line`, clamped to the document.
     fn set_top(&mut self, line: u32) {
-        let line = line.min(self.max_top());
-        if line >= self.top {
-            self.state.scroll_down(line - self.top);
-        } else {
-            self.state.scroll_up(self.top - line);
-        }
-        self.top = line;
+        self.state.scroll_to_line(line.min(self.max_top()));
     }
 
     /// Scroll the view by `delta` rows. `pub(crate)` so the event loop can route
     /// mouse-wheel scrolls here, the same as in the tree/preview.
     pub(crate) fn scroll(&mut self, delta: i32) {
-        let next = (i64::from(self.top) + i64::from(delta)).max(0);
+        // A PDF has no rows to scroll: the same keys step pages instead.
+        if self.is_paged() {
+            match delta.signum() {
+                1 => self.state.next_page(),
+                -1 => self.state.prev_page(),
+                _ => {}
+            }
+            return;
+        }
+        let next = (i64::from(self.top()) + i64::from(delta)).max(0);
         self.set_top(next as u32);
     }
 
     fn page(&mut self, dir: i32) {
-        let step = i32::from(self.page_rows.max(1));
+        let step = i32::from(self.page_rows());
         self.scroll(step * dir);
     }
 
     fn half_page(&mut self, dir: i32) {
-        let step = i32::from((self.page_rows / 2).max(1));
+        let step = i32::from((self.page_rows() / 2).max(1));
         self.scroll(step * dir);
     }
 
@@ -227,7 +309,7 @@ impl Reader {
     /// Center the viewport on a 1-based line.
     fn goto_line(&mut self, one_based: usize) {
         let line = one_based.saturating_sub(1) as u32;
-        let half = u32::from(self.page_rows) / 2;
+        let half = u32::from(self.page_rows()) / 2;
         self.set_top(line.saturating_sub(half));
     }
 
@@ -249,7 +331,7 @@ impl Reader {
     fn request_edit(&mut self) {
         self.pending_handoff = Some(Handoff::EditAtLine {
             path: self.path.clone(),
-            line: self.top as usize + 1,
+            line: self.top() as usize + 1,
         });
     }
 
@@ -346,7 +428,7 @@ impl Reader {
         }
         let current = matches
             .iter()
-            .position(|&l| l as u32 >= self.top)
+            .position(|&l| l as u32 >= self.top())
             .unwrap_or(0);
         let line = matches[current];
         self.search = Some(Search { matches, current });
@@ -404,11 +486,16 @@ pub fn render(frame: &mut Frame, reader: &mut Reader, area: Rect) {
     ])
     .areas(area);
 
-    reader.page_rows = body_area.height;
     render_title(frame, reader, title_area);
-    // Disjoint borrows: `doc`/`decorations` (shared) and `state` (mutable).
+    let folds = reader.folds();
+    // Disjoint borrows: `doc`/`decorations`/`folds` (shared) and `state` (mutable).
     frame.render_stateful_widget(
-        FileView::new(&reader.doc).decorations(&reader.decorations),
+        FileView::new(&reader.doc)
+            .graphics(fileview::graphics_protocol())
+            .decorations(&reader.decorations)
+            .folds(&folds)
+            .word_wrap(reader.word_wrap)
+            .sticky_scroll(true),
         body_area,
         &mut reader.state,
     );
@@ -429,9 +516,12 @@ fn render_title(frame: &mut Frame, reader: &Reader, area: Rect) {
         ));
     }
 
-    // The line position is meaningful only for the scrollable text branch.
+    // A position only means something where there is one: lines for text, pages
+    // for a PDF, nothing for an image or a placeholder.
     let position = if reader.doc.language().is_some() {
-        format!("ln {}/{}", reader.top + 1, reader.doc.row_count().max(1))
+        format!("ln {}/{}", reader.top() + 1, reader.doc.row_count().max(1))
+    } else if let Some(pages) = reader.doc.page_count() {
+        format!("pg {}/{}", reader.state.doc_page() + 1, pages.max(1))
     } else {
         String::new()
     };
@@ -512,13 +602,14 @@ mod tests {
             doc,
             state: FileViewState::new(),
             text,
-            top: 0,
-            page_rows: 1,
+            word_wrap: false,
+            folded: BTreeSet::new(),
             search: None,
             decorations: Vec::new(),
             prompt: Prompt::None,
             pending_handoff: None,
             count: String::new(),
+            pending_z: false,
             pending_g: false,
         }
     }
@@ -545,7 +636,7 @@ mod tests {
     }
 
     /// Drive the view through one render so its viewport is known, then read the
-    /// (shadowed) top line.
+    /// top line.
     fn rendered_top(reader: &mut Reader) -> usize {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
@@ -553,7 +644,7 @@ mod tests {
         terminal
             .draw(|frame| render(frame, reader, frame.area()))
             .unwrap();
-        reader.top as usize
+        reader.top() as usize
     }
 
     #[test]

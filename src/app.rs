@@ -4,8 +4,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(feature = "raster")]
+use crate::ui::fileview::FileDoc;
+use crate::ui::fileview::FileViewState;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use karet_fileview::FileViewState;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::widgets::{Row, TableState};
 
@@ -392,6 +394,29 @@ impl App {
             }
         }
         None
+    }
+
+    #[cfg(feature = "raster")]
+    /// The file view painted this frame — the reader's body, or the preview pane
+    /// — as the pair the post-draw Kitty flush needs. `None` when no file is on
+    /// screen, which is itself the signal to clear a previously drawn image.
+    ///
+    /// The help overlay counts as nothing on screen: a Kitty placement is drawn
+    /// above the cell buffer, so an image left up would cover the popup that is
+    /// supposed to be covering *it*.
+    pub fn active_file_view(&self) -> Option<(&FileDoc, &FileViewState)> {
+        if self.show_help {
+            return None;
+        }
+        match &self.screen {
+            Screen::Reader(reader) => Some(reader.file_view()),
+            Screen::Loaded(loaded) => loaded
+                .preview
+                .doc
+                .as_ref()
+                .map(|doc| (doc, &loaded.preview.state)),
+            _ => None,
+        }
     }
 
     /// Load the preview for the current selection. Driven by the event loop's
@@ -1223,6 +1248,33 @@ mod tests {
     use crate::model::{CodeData, CodeNum, build_skeleton};
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    /// The Kitty flush must find nothing to draw while the help overlay is up:
+    /// a placement sits above the cell buffer, so it would cover the popup.
+    #[cfg(feature = "raster")]
+    #[test]
+    fn the_help_overlay_hides_the_active_file_view() {
+        use crate::ui::fileview::{FileDoc, Limits};
+
+        let mut app = sample_app();
+        let Screen::Loaded(loaded) = &mut app.screen else {
+            unreachable!("sample_app is loaded")
+        };
+        let src = b"fn main() {}\n";
+        loaded.preview = crate::ui::preview::Preview::from_doc(FileDoc::prepare(
+            Path::new("main.rs"),
+            src,
+            src.len() as u64,
+            &Limits::default(),
+        ));
+        assert!(app.active_file_view().is_some());
+
+        app.show_help = true;
+        assert!(
+            app.active_file_view().is_none(),
+            "an image must be cleared while the help overlay is up"
+        );
+    }
 
     /// A loaded app for `/proj` with `src/main.rs` and a top-level `README.md`.
     fn sample_app() -> App {

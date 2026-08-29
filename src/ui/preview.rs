@@ -1,20 +1,21 @@
 //! The side-by-side preview pane.
 //!
-//! Shows the selected file through the `karet-fileview` widget: syntax-highlighted
-//! code (tree-sitter), an inline image (truecolor half-blocks), a hex dump for
-//! binaries, or a placeholder for PDFs / oversized / undecodable files. Content is
-//! prepared once from a bounded prefix and cached on the [`Loaded`] state, refreshed
-//! only when the selection changes (see `Loaded::ensure_preview`).
+//! Shows the selected file through the [`FileView`] widget: syntax-highlighted
+//! code (tree-sitter), an inline image (Kitty graphics, or truecolor half-blocks
+//! where the terminal can't), a hex dump for binaries, or a placeholder for
+//! oversized / undecodable files. Content is prepared once from a bounded prefix
+//! and cached on the [`Loaded`] state, refreshed only when the selection changes
+//! (see `Loaded::ensure_preview`).
 
 use std::path::Path;
 
-use karet_fileview::{FileDoc, FileView, FileViewState, Limits};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
+use super::fileview::{self, FileDoc, FileView, FileViewState, Limits};
 use super::theme;
 use crate::app::{Focus, Loaded};
 
@@ -113,7 +114,11 @@ pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
 
     if let Some(doc) = &loaded.preview.doc {
         // Disjoint borrows of `doc` (shared) and `state` (mutable).
-        frame.render_stateful_widget(FileView::new(doc), inner, &mut loaded.preview.state);
+        frame.render_stateful_widget(
+            FileView::new(doc).graphics(fileview::graphics_protocol()),
+            inner,
+            &mut loaded.preview.state,
+        );
     } else if let Some(note) = &loaded.preview.note {
         let note = Paragraph::new(Line::from(Span::styled(
             note.clone(),

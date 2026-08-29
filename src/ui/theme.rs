@@ -1,10 +1,23 @@
 //! Colors, glyphs, and small formatting helpers shared across the UI.
 
+use std::sync::OnceLock;
+
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use tokei::LanguageType;
 
 use crate::model::{SubKey, Tint};
+
+/// The theme the file-view widgets paint with — token colors for highlighted
+/// code, plus the UI roles behind the hex dump and the search-match background.
+///
+/// This is karet's own dark theme, kept separate from the chrome palette below:
+/// the constants here color tree-tui's frame, `karet_theme::Theme` colors the file
+/// body. Built once, since every frame that renders a file needs it.
+pub fn editor_theme() -> &'static karet_theme::Theme {
+    static THEME: OnceLock<karet_theme::Theme> = OnceLock::new();
+    THEME.get_or_init(karet_theme::Theme::dark)
+}
 
 // Tree glyphs (Unicode, renders everywhere).
 pub const GLYPH_EXPANDED: &str = "▾";

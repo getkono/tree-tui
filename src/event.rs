@@ -10,6 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::app::{App, Screen};
 use crate::collect::{self, LayerResult};
 use crate::scan::ScanOutcome;
+#[cfg(feature = "raster")]
+use crate::ui::fileview;
 use crate::ui::reader::Handoff;
 use crate::{editor, pager, scan, tui, ui, watch};
 
@@ -42,7 +44,8 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
     let mut preview_target = app.preview_target_id();
     let mut preview_deadline: Option<tokio::time::Instant> = None;
 
-    terminal.draw(|frame| ui::render(frame, app))?;
+    let mut kitty = KittyImages::default();
+    draw(terminal, app, &mut kitty)?;
 
     while !app.should_quit {
         let mut redraw = false;
@@ -126,9 +129,49 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
             break;
         }
         if redraw {
-            terminal.draw(|frame| ui::render(frame, app))?;
+            draw(terminal, app, &mut kitty)?;
         }
     }
+    Ok(())
+}
+
+/// Terminal-graphics state carried between frames.
+///
+/// Kitty placements live outside the ratatui buffer, so redrawing the cells under
+/// one does not remove it. Tracking whether the previous frame drew one lets the
+/// first frame that doesn't clear it — otherwise an image would survive on top of
+/// the tree after the selection moves off the file that showed it.
+///
+/// Without the `raster` feature nothing is ever transmitted, so there is nothing
+/// to remember.
+#[derive(Default)]
+struct KittyImages {
+    #[cfg(feature = "raster")]
+    shown: bool,
+}
+
+/// Render one frame, then transmit or clear the terminal-graphics image that goes
+/// with it.
+fn draw(
+    terminal: &mut DefaultTerminal,
+    app: &mut App,
+    kitty: &mut KittyImages,
+) -> color_eyre::Result<()> {
+    terminal.draw(|frame| ui::render(frame, app))?;
+    #[cfg(feature = "raster")]
+    {
+        let mut out = std::io::stdout();
+        let drew = match app.active_file_view() {
+            Some((doc, state)) => fileview::flush_kitty_image(doc, state, &mut out)?,
+            None => false,
+        };
+        if !drew && kitty.shown {
+            fileview::clear_kitty_images(&mut out)?;
+        }
+        kitty.shown = drew;
+    }
+    #[cfg(not(feature = "raster"))]
+    let _ = kitty;
     Ok(())
 }
 
