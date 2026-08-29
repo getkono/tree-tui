@@ -286,7 +286,11 @@ pub struct FileViewState {
     editor: EditorState,
     /// First visible 16-byte row for the hex branch.
     hex_scroll: usize,
-    /// Viewport height captured at the last render, for page scrolling.
+    /// How far one page scrolls, captured at the last render.
+    ///
+    /// Counted in whatever unit the branch scrolls by: buffer *lines* for text
+    /// (which is not the pane height — soft wrap spends several rows on one line,
+    /// and sticky headers eat rows off the top), and hex rows otherwise.
     page: u16,
     /// The rect reserved for a Kitty image this frame, consumed by
     /// [`flush_kitty_image`]. `None` for every other branch/protocol.
@@ -361,10 +365,16 @@ impl FileViewState {
         self.pending_image = None;
     }
 
-    /// Advance to the next page of a PDF. Clamped to the last page when rendered;
-    /// a no-op for every other branch.
-    pub fn next_page(&mut self) {
-        self.doc_page = self.doc_page.saturating_add(1);
+    /// Advance to the next page of a PDF, stopping at the last one.
+    ///
+    /// `page_count` is the caller's, because the state does not know the document:
+    /// clamping here rather than at render time keeps `doc_page` in range for
+    /// anything that reads it before the next frame, such as a page counter.
+    pub fn next_page(&mut self, page_count: usize) {
+        self.doc_page = self
+            .doc_page
+            .saturating_add(1)
+            .min(page_count.saturating_sub(1));
     }
 
     /// Go back to the previous page of a PDF.
@@ -448,14 +458,18 @@ impl<'a> FileView<'a> {
     }
 
     #[cfg(any(feature = "images", feature = "pdf"))]
-    /// Reserve `area` for a Kitty placement: paint the themed background so the
-    /// cells underneath are clean, and record the rect for the post-draw flush.
-    fn reserve_kitty(&self, area: Rect, buf: &mut Buffer, state: &mut FileViewState) {
+    /// Reserve `rect` for a Kitty placement, painting the themed background across
+    /// the whole `area` behind it.
+    ///
+    /// The placement is aspect-fit, so it rarely fills the pane; painting only
+    /// under the image would leave the terminal's own background in the margins,
+    /// which is not the color the rest of the view is drawn on.
+    fn reserve_kitty(&self, area: Rect, rect: Rect, buf: &mut Buffer, state: &mut FileViewState) {
         buf.set_style(
             area,
             Style::default().bg(self.theme.role(ThemeRole::Background).to_ratatui()),
         );
-        state.pending_image = Some(area);
+        state.pending_image = Some(rect);
     }
 }
 
@@ -468,7 +482,7 @@ impl StatefulWidget for FileView<'_> {
 
         match &self.doc.content {
             Content::Text(text) => {
-                Editor::new(&text.buffer)
+                let editor = Editor::new(&text.buffer)
                     .theme(self.theme)
                     .highlights(&text.highlights)
                     .semantic_blocks(&text.blocks)
@@ -476,17 +490,17 @@ impl StatefulWidget for FileView<'_> {
                     .folds(self.folds)
                     .word_wrap(self.word_wrap)
                     .sticky_scroll(self.sticky_scroll)
-                    .read_only(true)
-                    .render(area, buf, &mut state.editor);
+                    .read_only(true);
+                editor.render(area, buf, &mut state.editor);
+                // Only the editor knows how many buffer lines it actually fit,
+                // once wrapping, sticky headers, and folds have taken their rows.
+                state.page = u16::try_from(state.editor.visible_lines()).unwrap_or(u16::MAX);
             }
             #[cfg(feature = "images")]
             Content::Image(img) => match self.protocol {
                 GraphicsProtocol::Kitty => {
-                    self.reserve_kitty(
-                        image::fit_rect(area, img.width(), img.height()),
-                        buf,
-                        state,
-                    );
+                    let rect = image::fit_rect(area, img.width(), img.height());
+                    self.reserve_kitty(area, rect, buf, state);
                 }
                 GraphicsProtocol::Halfblocks => ImageWidget::new(img).render(area, buf),
             },
@@ -508,11 +522,13 @@ impl StatefulWidget for FileView<'_> {
                             // Reserve an aspect-fit sub-rect so the page isn't stretched.
                             Some((_, img)) => {
                                 let rect = image::fit_rect(area, img.width(), img.height());
-                                self.reserve_kitty(rect, buf, state);
+                                self.reserve_kitty(area, rect, buf, state);
                             }
                             // Rasterization failed — fall back to a neutral placeholder.
-                            None => Placeholder::new(&self.doc.path, self.doc.kind, None, 0)
-                                .render(area, buf),
+                            None => {
+                                Placeholder::new(&self.doc.path, self.doc.kind, None, self.doc.len)
+                                    .render(area, buf)
+                            }
                         }
                     }
                     // No Kitty graphics: say what's missing rather than pretending
@@ -752,6 +768,80 @@ mod tests {
             })
         });
         assert!(!any_caret, "the read-only branch must not draw a caret");
+    }
+
+    /// A page must be the buffer lines the editor actually painted, not the pane's
+    /// row count: with soft wrap on, one line spends several rows, so paging by
+    /// rows would step over everything in between.
+    #[test]
+    fn a_wrapped_page_scrolls_by_lines_painted_not_rows() {
+        let src = "lorem ipsum dolor sit amet "
+            .repeat(8)
+            .trim_end()
+            .to_string()
+            + "\n";
+        let src = src.repeat(200);
+        let doc = FileDoc::prepare(
+            Path::new("wrapped.md"),
+            src.as_bytes(),
+            src.len() as u64,
+            &Limits::default(),
+        );
+        let area = Rect::new(0, 0, 60, 22);
+        let mut state = FileViewState::new();
+        let mut buf = Buffer::empty(area);
+        FileView::new(&doc)
+            .word_wrap(true)
+            .render(area, &mut buf, &mut state);
+
+        let page = state.page_rows();
+        assert!(
+            page < area.height,
+            "wrapped lines must page by fewer lines than rows: page={page}, rows={}",
+            area.height
+        );
+
+        // The next page must start exactly where this one stopped — no gap.
+        let top = state.top();
+        state.page_down();
+        assert_eq!(
+            state.top(),
+            top + u32::from(page),
+            "paging skipped lines between the two viewports"
+        );
+    }
+
+    /// Without wrapping there is nothing to compress, so a page is the pane.
+    #[test]
+    fn an_unwrapped_page_scrolls_by_the_pane_height() {
+        let src = "fn a() {}\n".repeat(200);
+        let doc = FileDoc::prepare(
+            Path::new("plain.rs"),
+            src.as_bytes(),
+            src.len() as u64,
+            &Limits::default(),
+        );
+        let area = Rect::new(0, 0, 60, 22);
+        let mut state = FileViewState::new();
+        let mut buf = Buffer::empty(area);
+        FileView::new(&doc).render(area, &mut buf, &mut state);
+        assert_eq!(state.page_rows(), area.height);
+    }
+
+    /// `doc_page` must never leave the document, even for the one frame before a
+    /// render would clamp it — a page counter reads it in between.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn paging_past_the_end_of_a_pdf_stays_on_the_last_page() {
+        let mut state = FileViewState::new();
+        state.next_page(1);
+        assert_eq!(state.doc_page(), 0, "a one-page document has nowhere to go");
+        state.next_page(3);
+        state.next_page(3);
+        state.next_page(3);
+        assert_eq!(state.doc_page(), 2, "clamped to the last page");
+        state.prev_page();
+        assert_eq!(state.doc_page(), 1);
     }
 
     #[test]

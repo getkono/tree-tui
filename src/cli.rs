@@ -67,8 +67,10 @@ pub fn resolve_icons(flag: Option<IconStyle>, env: Option<&str>) -> IconStyle {
 /// Parse arguments (everything after `argv[0]`).
 ///
 /// `-V`/`-h` are terminal: they win as soon as they are seen, regardless of
-/// surrounding positionals. The directory is optional and defaults to `.`, so
-/// bare `tree` is equivalent to `tree .`.
+/// surrounding positionals. The one exception is the position right after
+/// `--icons`, which is read as that flag's value (so `tree --icons -h` reports a
+/// bad value rather than printing help). The directory is optional and defaults
+/// to `.`, so bare `tree` is equivalent to `tree .`.
 pub fn parse<I, S>(args: I) -> Result<Command, CliError>
 where
     I: IntoIterator<Item = S>,

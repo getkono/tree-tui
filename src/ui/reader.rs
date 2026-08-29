@@ -277,8 +277,9 @@ impl Reader {
     pub(crate) fn scroll(&mut self, delta: i32) {
         // A PDF has no rows to scroll: the same keys step pages instead.
         if self.is_paged() {
+            let pages = self.doc.page_count().unwrap_or(1);
             match delta.signum() {
-                1 => self.state.next_page(),
+                1 => self.state.next_page(pages),
                 -1 => self.state.prev_page(),
                 _ => {}
             }
@@ -486,7 +487,10 @@ pub fn render(frame: &mut Frame, reader: &mut Reader, area: Rect) {
     ])
     .areas(area);
 
-    render_title(frame, reader, title_area);
+    // The body renders first: the title reports the viewport (`ln`/`pg`), and it is
+    // the body's render that settles it — clamping the scroll and the PDF page,
+    // normalizing the anchor past folded lines, and measuring the page size. Titling
+    // first would show the pre-render numbers until some later event forced a redraw.
     let folds = reader.folds();
     // Disjoint borrows: `doc`/`decorations`/`folds` (shared) and `state` (mutable).
     frame.render_stateful_widget(
@@ -499,6 +503,7 @@ pub fn render(frame: &mut Frame, reader: &mut Reader, area: Rect) {
         body_area,
         &mut reader.state,
     );
+    render_title(frame, reader, title_area);
     render_footer(frame, reader, footer_area);
 }
 
