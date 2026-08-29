@@ -54,7 +54,7 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
             // pattern. `apply_event` reports whether anything changed on screen,
             // so idle events (mouse motion is not even tracked) cost no redraw.
             maybe_event = events.next() => match maybe_event {
-                Some(Ok(event)) => redraw = apply_event(terminal, app, event)?,
+                Some(Ok(event)) => redraw = apply_event(terminal, app, &mut kitty, event)?,
                 Some(Err(err)) => return Err(err.into()),
                 None => app.should_quit = true,
             },
@@ -152,6 +152,21 @@ struct KittyImages {
     shown: Option<fileview::Placement>,
 }
 
+impl KittyImages {
+    /// Forget what is on screen, so the next frame transmits again.
+    ///
+    /// Needed whenever something outside this loop could have destroyed the
+    /// placement — leaving the alternate screen for `$EDITOR`/`$PAGER` does, on
+    /// most terminals. Without this the dedup would believe an image it can no
+    /// longer see is still up, and never redraw it.
+    fn forget(&mut self) {
+        #[cfg(feature = "raster")]
+        {
+            self.shown = None;
+        }
+    }
+}
+
 /// Render one frame, then transmit or clear the terminal-graphics image that goes
 /// with it.
 fn draw(
@@ -177,13 +192,18 @@ fn draw(
 fn apply_event(
     terminal: &mut DefaultTerminal,
     app: &mut App,
+    kitty: &mut KittyImages,
     event: Event,
 ) -> color_eyre::Result<bool> {
     let redraw = match event {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             app.handle_key(key);
-            drain_pending_edit(terminal, app)?;
-            drain_reader_handoff(terminal, app)?;
+            // Leaving the alternate screen for an external program takes the
+            // terminal's image placements with it on most terminals, so whatever
+            // we believed was on screen no longer is.
+            if drain_pending_edit(terminal, app)? | drain_reader_handoff(terminal, app)? {
+                kitty.forget();
+            }
             drain_pending_capture(app);
             true
         }
@@ -204,7 +224,13 @@ fn apply_event(
             }
             _ => false,
         },
-        Event::Resize(_, _) => true,
+        Event::Resize(_, _) => {
+            // A resize can move or drop a graphics placement, and the pane it was
+            // reserved in may land at the same coordinates — so re-transmit rather
+            // than trust the recorded one.
+            kitty.forget();
+            true
+        }
         // Key releases, focus changes, paste: nothing to repaint for.
         _ => false,
     };
@@ -220,23 +246,29 @@ fn drain_pending_capture(app: &mut App) {
 
 /// Suspend the TUI to run `$EDITOR`/`$PAGER` if the reader queued a handoff. The
 /// reader stays open across it, so we return to the reader on the way back.
-fn drain_reader_handoff(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
-    if let Some(handoff) = app.take_reader_handoff() {
-        match handoff {
-            Handoff::EditAtLine { path, line } => {
-                tui::suspended(terminal, || editor::open_at_line(&path, line))?
-            }
-            Handoff::Pager { path } => tui::suspended(terminal, || pager::open(&path))?,
+///
+/// Reports whether it suspended, since that invalidates the terminal's graphics.
+fn drain_reader_handoff(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<bool> {
+    let Some(handoff) = app.take_reader_handoff() else {
+        return Ok(false);
+    };
+    match handoff {
+        Handoff::EditAtLine { path, line } => {
+            tui::suspended(terminal, || editor::open_at_line(&path, line))?
         }
+        Handoff::Pager { path } => tui::suspended(terminal, || pager::open(&path))?,
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Suspend the TUI to run `$EDITOR` if a key queued an edit. Drained per key so
 /// two edits in one burst each suspend and restore correctly.
-fn drain_pending_edit(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<()> {
-    if let Some(path) = app.pending_edit.take() {
-        tui::suspended(terminal, || editor::open(&path))?;
-    }
-    Ok(())
+///
+/// Reports whether it suspended, since that invalidates the terminal's graphics.
+fn drain_pending_edit(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::Result<bool> {
+    let Some(path) = app.pending_edit.take() else {
+        return Ok(false);
+    };
+    tui::suspended(terminal, || editor::open(&path))?;
+    Ok(true)
 }

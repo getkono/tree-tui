@@ -99,6 +99,17 @@ pub fn suspended<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> st
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
 
+    // Delete any terminal-graphics image before handing the screen over: a
+    // placement is not part of the cell buffer, so it can outlive the alternate
+    // screen and land on top of the program we are about to run.
+    #[cfg(feature = "raster")]
+    {
+        use std::io::Write;
+
+        let mut out = std::io::stdout();
+        let _ = crate::ui::fileview::clear_kitty_images(&mut out);
+        let _ = out.flush();
+    }
     pop_keyboard_enhancement();
     // Hand the mouse back so the external program (and its native selection)
     // behaves normally; re-grab on return only if we had it.
