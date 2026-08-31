@@ -27,7 +27,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use super::fileview::{self, FileDoc, FileView, FileViewState, Limits};
+use super::fileview::{self, FileDoc, FileView, FileViewState, Limits, Stamp};
 use super::preview::read_bounded;
 use super::theme;
 use crate::app::Loaded;
@@ -88,6 +88,20 @@ pub struct Reader {
     /// File size in bytes, for the title bar.
     pub bytes: u64,
     /// The prepared document rendered in the body.
+    ///
+    /// Deliberately a **snapshot**: it is prepared once at [`Reader::open`] and
+    /// never refreshed, even though a rescan behind the reader does mark the
+    /// suspended tree's preview stale. Re-preparing under a scrolled, folded,
+    /// mid-search reader would discard exactly the state that makes the reader
+    /// useful — and the fold regions and search hits it would be preserving were
+    /// computed from bytes that no longer exist, so "preserving" them is
+    /// approximate at best. Reopening the file is one keypress.
+    ///
+    /// Known exception, deliberately left: returning from
+    /// [`Handoff::EditAtLine`], where the user edited this file *through this
+    /// view* and comes back to pre-edit bytes, a stale `text` for search, and
+    /// stale folds. Refreshing there would be defensible; it wants its own
+    /// change.
     doc: FileDoc,
     /// Scroll (and image-reserve) state for the view.
     state: FileViewState,
@@ -114,12 +128,16 @@ pub struct Reader {
 impl Reader {
     /// Open `path` (a file) in the reader, taking ownership of the tree state.
     pub fn open(loaded: Box<Loaded>, path: PathBuf) -> Self {
-        let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        // One stat, read twice: a second one could straddle a write and hand the
+        // document a stamp that disagrees with the length it was classified by.
+        let meta = std::fs::metadata(&path).ok();
+        let len = meta.as_ref().map_or(0, |m| m.len());
+        let stamp = meta.as_ref().map(Stamp::from_metadata);
         let limits = reader_limits();
         // Read a bounded prefix; an oversized file yields a head sample and
         // `prepare` classifies it `TooLarge` from `len` (a placeholder).
         let bytes = read_bounded(&path, limits.max_bytes).unwrap_or_default();
-        let doc = FileDoc::prepare(&path, &bytes, len, &limits);
+        let doc = FileDoc::prepare(&path, &bytes, len, &limits).with_stamp(stamp);
         let text = doc
             .language()
             .is_some()

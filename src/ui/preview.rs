@@ -4,8 +4,19 @@
 //! code (tree-sitter), an inline image (Kitty graphics, or truecolor half-blocks
 //! where the terminal can't), a hex dump for binaries, or a placeholder for
 //! oversized / undecodable files. Content is prepared once from a bounded prefix
-//! and cached on the [`Loaded`] state, refreshed only when the selection changes
-//! (see `Loaded::ensure_preview`).
+//! and cached on the [`Loaded`] state.
+//!
+//! The cache is rebuilt on three triggers. Two reach `Loaded::ensure_preview`,
+//! which tells them apart because they want different scroll behavior: the
+//! selection moving to another file (start at the top), and the previewed file
+//! itself changing on disk (hold the viewport). The second is detected by
+//! comparing the [`Stamp`] recorded here against a fresh `stat`, in
+//! `Loaded::mark_preview_stale_if_changed`, on every rescan.
+//!
+//! The third is `Loaded::reload`, which drops a note-only preview outright.
+//! A note has no document to stamp and its text is a function of the tree
+//! rather than of any file, so the freshness check skips it and a structural
+//! rescan rebuilds it instead.
 
 use std::path::Path;
 
@@ -15,7 +26,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use super::fileview::{self, FileDoc, FileView, FileViewState, Limits};
+use super::fileview::{self, FileDoc, FileView, FileViewState, Limits, Stamp};
 use super::theme;
 use crate::app::{Focus, Loaded};
 
@@ -43,6 +54,15 @@ pub struct Preview {
     pub yank: Option<String>,
     /// Scroll state for the view; reset when the selection changes.
     pub state: FileViewState,
+    /// What the file looked like when this was built, for the freshness check
+    /// in `Loaded::mark_preview_stale_if_changed`.
+    ///
+    /// `None` for a note-only preview — a directory, or a file that could not
+    /// be stat'd or read. Those carry no document for a stamp to describe, so
+    /// the freshness check skips them entirely and `Loaded::reload` refreshes
+    /// them instead; a directory in particular *does* `stat` successfully, and
+    /// comparing that against this `None` would report "changed" forever.
+    pub stamp: Option<Stamp>,
 }
 
 impl Preview {
@@ -62,14 +82,20 @@ impl Preview {
             note: None,
             yank: None,
             state: FileViewState::new(),
+            stamp: None,
         }
     }
 }
 
 /// Build the preview for `path` (a file), reading at most a bounded prefix.
 pub fn load(path: &Path) -> Preview {
-    let len = match std::fs::metadata(path) {
-        Ok(meta) => meta.len(),
+    // Stat first, read second, and keep it that way. A write landing between
+    // the two stores the *older* stamp against the *newer* bytes, which costs
+    // one redundant reload and converges. Stat'ing from the open handle instead
+    // would store a stamp describing content that was never read — and that
+    // change would then be invisible forever.
+    let (len, stamp) = match std::fs::metadata(path) {
+        Ok(meta) => (meta.len(), Some(Stamp::from_metadata(&meta))),
         Err(err) => return Preview::note(format!("cannot read file: {err}")),
     };
     let limits = preview_limits();
@@ -77,9 +103,12 @@ pub fn load(path: &Path) -> Preview {
     // `prepare` classifies it `TooLarge` from `len` without reading the body.
     let bytes = match read_bounded(path, limits.max_bytes) {
         Ok(bytes) => bytes,
+        // Stat'able but unreadable (mode 000, an I/O error). A note, so it
+        // carries no stamp; `reload` rebuilds it on the next structural rescan,
+        // which is also how it recovers once the file becomes readable.
         Err(err) => return Preview::note(format!("cannot read file: {err}")),
     };
-    let doc = FileDoc::prepare(path, &bytes, len, &limits);
+    let doc = FileDoc::prepare(path, &bytes, len, &limits).with_stamp(stamp);
     // A text/markdown document exposes a language; keep its text for `y` yank.
     let yank = doc
         .language()
@@ -90,6 +119,7 @@ pub fn load(path: &Path) -> Preview {
         note: None,
         yank,
         state: FileViewState::new(),
+        stamp,
     }
 }
 
