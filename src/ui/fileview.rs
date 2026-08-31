@@ -627,8 +627,11 @@ pub fn sync_kitty_image(
             Ok(())
         }
         None if shown.is_some() => {
+            // Kitty by construction: `shown` is `Some` only after a transmit,
+            // and only the Kitty arm of `render` ever reserves a rect to
+            // transmit from.
             *shown = None;
-            clear_kitty_images(out)
+            write_kitty_delete(out)
         }
         None => Ok(()),
     }
@@ -637,9 +640,32 @@ pub fn sync_kitty_image(
 /// Delete every image this process transmitted through the Kitty protocol.
 ///
 /// Used on teardown, where there is no placement state left to track — leaving
-/// one behind would strand it on the shell the user returns to.
+/// one behind would strand it on the shell the user returns to. A half-block
+/// terminal was never sent a placement, so it is owed no escape and this is a
+/// no-op there.
+///
+/// `protocol` is a parameter rather than a read of [`graphics_protocol`] so the
+/// decision can be exercised without the process-wide `OnceLock`, which a test
+/// cannot set reliably — the same reason `ui::theme::dir_glyphs` takes its icon
+/// style.
+///
+/// # Errors
+/// Propagates any write/flush error from `out`.
 #[cfg(feature = "raster")]
-pub fn clear_kitty_images(out: &mut impl Write) -> io::Result<()> {
+pub fn clear_kitty_images(protocol: GraphicsProtocol, out: &mut impl Write) -> io::Result<()> {
+    if protocol != GraphicsProtocol::Kitty {
+        return Ok(());
+    }
+    write_kitty_delete(out)
+}
+
+/// Write the Kitty "delete every placement" escape, no questions asked.
+///
+/// Callers that reach this already know the terminal speaks the protocol —
+/// either because they transmitted the placement themselves, or because
+/// [`clear_kitty_images`] checked.
+#[cfg(feature = "raster")]
+fn write_kitty_delete(out: &mut impl Write) -> io::Result<()> {
     write!(out, "{}", image::kitty_delete_all())?;
     out.flush()
 }
@@ -942,6 +968,27 @@ trailer<</Size 4/Root 1 0 R>>\n%%EOF";
         let buf = render(&doc, Rect::new(0, 0, 60, 8), &mut state);
         assert!(text_of(&buf).contains("Kitty graphics protocol"));
         assert!(state.pending_image.is_none(), "nothing should be reserved");
+    }
+
+    #[cfg(feature = "raster")]
+    #[test]
+    fn clearing_images_only_speaks_to_a_kitty_terminal() {
+        // The teardown paths call this blind, before anything has reserved a
+        // rect — so the protocol, not the `raster` feature, decides.
+        let mut halfblocks = Vec::new();
+        clear_kitty_images(GraphicsProtocol::Halfblocks, &mut halfblocks)
+            .expect("a Vec never fails");
+        assert!(
+            halfblocks.is_empty(),
+            "a half-block terminal was never sent a placement"
+        );
+
+        let mut kitty = Vec::new();
+        clear_kitty_images(GraphicsProtocol::Kitty, &mut kitty).expect("a Vec never fails");
+        assert!(
+            String::from_utf8_lossy(&kitty).contains("\x1b_Ga=d"),
+            "expected a Kitty delete-all"
+        );
     }
 
     #[cfg(feature = "raster")]
