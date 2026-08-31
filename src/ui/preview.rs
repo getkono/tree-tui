@@ -6,12 +6,17 @@
 //! oversized / undecodable files. Content is prepared once from a bounded prefix
 //! and cached on the [`Loaded`] state.
 //!
-//! The cache is rebuilt on two triggers, and `Loaded::ensure_preview` tells them
-//! apart because they want different scroll behavior: the selection moving to
-//! another file (start at the top), and the previewed file itself changing on
-//! disk (hold the viewport). The second is detected by comparing the [`Stamp`]
-//! recorded here against a fresh `stat` — see
-//! `Loaded::mark_preview_stale_if_changed`, which runs on every rescan.
+//! The cache is rebuilt on three triggers. Two reach `Loaded::ensure_preview`,
+//! which tells them apart because they want different scroll behavior: the
+//! selection moving to another file (start at the top), and the previewed file
+//! itself changing on disk (hold the viewport). The second is detected by
+//! comparing the [`Stamp`] recorded here against a fresh `stat`, in
+//! `Loaded::mark_preview_stale_if_changed`, on every rescan.
+//!
+//! The third is `Loaded::reload`, which drops a note-only preview outright.
+//! A note has no document to stamp and its text is a function of the tree
+//! rather than of any file, so the freshness check skips it and a structural
+//! rescan rebuilds it instead.
 
 use std::path::Path;
 
@@ -52,11 +57,11 @@ pub struct Preview {
     /// What the file looked like when this was built, for the freshness check
     /// in `Loaded::mark_preview_stale_if_changed`.
     ///
-    /// `None` only where the file could not be stat'd at all (and for a
-    /// directory, whose note has no content to go stale). A *read* failure
-    /// still records the stamp: left `None` it would compare unequal to disk
-    /// forever, so every filesystem event under the root — a `cargo build`,
-    /// say — would re-open and re-fail the same unreadable file.
+    /// `None` for a note-only preview — a directory, or a file that could not
+    /// be stat'd or read. Those carry no document for a stamp to describe, so
+    /// the freshness check skips them entirely and `Loaded::reload` refreshes
+    /// them instead; a directory in particular *does* `stat` successfully, and
+    /// comparing that against this `None` would report "changed" forever.
     pub stamp: Option<Stamp>,
 }
 
@@ -91,8 +96,6 @@ pub fn load(path: &Path) -> Preview {
     // change would then be invisible forever.
     let (len, stamp) = match std::fs::metadata(path) {
         Ok(meta) => (meta.len(), Some(Stamp::from_metadata(&meta))),
-        // Unstat-able: no stamp to record, and `Stamp::of` will keep answering
-        // `None` too, so this compares equal and does not re-read on every event.
         Err(err) => return Preview::note(format!("cannot read file: {err}")),
     };
     let limits = preview_limits();
@@ -100,14 +103,10 @@ pub fn load(path: &Path) -> Preview {
     // `prepare` classifies it `TooLarge` from `len` without reading the body.
     let bytes = match read_bounded(path, limits.max_bytes) {
         Ok(bytes) => bytes,
-        // Stat'able but unreadable (mode 000, an I/O error). The stamp is real
-        // and must be kept, or this file re-opens and re-fails on every event.
-        Err(err) => {
-            return Preview {
-                stamp,
-                ..Preview::note(format!("cannot read file: {err}"))
-            };
-        }
+        // Stat'able but unreadable (mode 000, an I/O error). A note, so it
+        // carries no stamp; `reload` rebuilds it on the next structural rescan,
+        // which is also how it recovers once the file becomes readable.
+        Err(err) => return Preview::note(format!("cannot read file: {err}")),
     };
     let doc = FileDoc::prepare(path, &bytes, len, &limits).with_stamp(stamp);
     // A text/markdown document exposes a language; keep its text for `y` yank.

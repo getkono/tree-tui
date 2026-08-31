@@ -789,6 +789,15 @@ impl Loaded {
     /// happens on *every* filesystem event rather than only on selection
     /// moves — a hung network mount is felt sooner than it used to be.
     fn mark_preview_stale_if_changed(&mut self, root: &Path) {
+        // Only a real document has content a stamp can describe. A note-only
+        // preview — a directory, an unreadable file — must be skipped, and a
+        // directory is the case that bites: `stat` succeeds on one, so
+        // comparing it against the note's absent stamp would report "changed"
+        // on every single event. Notes are refreshed by `reload` instead, which
+        // fires exactly when their text (the chained display name) can change.
+        if self.preview.doc.is_none() {
+            return;
+        }
         let Some(rel) = &self.preview_for else {
             return;
         };
@@ -1069,14 +1078,17 @@ impl Loaded {
             .selected_id()
             .map(|id| self.tree.nodes[id].rel_path.clone());
 
-        // A note-only preview (a directory, a read error) is a `format!` over
-        // the *chained* display name — `src/main/java` — so adding a file under
-        // `src/main` breaks the chain and the note goes wrong. It has no stamp
-        // to compare against disk and costs nothing to rebuild, so a rescan
-        // simply drops it. A real document is left alone; freshness for those is
-        // `mark_preview_stale_if_changed`'s job.
+        // A note-only preview (a directory, an unreadable file) is a `format!`
+        // over the *chained* display name — `src/main/java` — so adding a file
+        // under `src/main` breaks the chain and the note goes wrong. Nothing
+        // downstream can notice that, since `mark_preview_stale_if_changed`
+        // skips notes, so a structural rescan drops it here. Drop the content
+        // along with the key: leaving it would paint a name that no longer
+        // exists in the tree until the debounce comes round. Rebuilding is a
+        // `format!`. A real document is left alone.
         if self.preview.doc.is_none() {
             self.preview_for = None;
+            self.preview = Preview::default();
         }
 
         self.tree = tree;
@@ -1372,6 +1384,85 @@ mod tests {
             app.active_file_view().is_none(),
             "an image must be cleared while the help overlay is up"
         );
+    }
+
+    /// A real directory under the system temp dir, removed on drop.
+    ///
+    /// Every other fixture here roots at `/proj`, which does not exist — fine
+    /// for tree logic, but it makes `Stamp::of` answer `None` for everything,
+    /// so a stamp comparison against it is vacuously true. Anything asserting
+    /// on freshness needs a filesystem that actually answers.
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tree-tui-test-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("src")).expect("create the temp root");
+            let root = Self(dir);
+            root.write("README.md", "# readme\n");
+            root.write("src/main.rs", "fn main() {}\n");
+            root
+        }
+
+        fn write(&self, rel: &str, body: &str) {
+            std::fs::write(self.0.join(rel), body).expect("write a fixture file");
+        }
+
+        /// An app over this root, with the same shape as [`sample_app`].
+        fn app(&self) -> App {
+            let mut app = App::new(self.0.clone(), "proj".into());
+            app.on_scan(ScanOutcome {
+                tree: self.tree(),
+                duration: Duration::ZERO,
+                repo: false,
+                head: None,
+            });
+            app.pending_compute = None;
+            set_panes(&mut app);
+            app
+        }
+
+        /// A walk of this root, as the scanner would report it.
+        fn tree(&self) -> Tree {
+            let files = vec![
+                (
+                    PathBuf::from("README.md"),
+                    std::fs::metadata(self.0.join("README.md")).unwrap().len(),
+                ),
+                (
+                    PathBuf::from("src/main.rs"),
+                    std::fs::metadata(self.0.join("src/main.rs")).unwrap().len(),
+                ),
+            ];
+            build_skeleton(&files, &[PathBuf::from("src")], "proj".into())
+        }
+
+        fn rescan(&self, app: &mut App) {
+            app.on_rescan(ScanOutcome {
+                tree: self.tree(),
+                duration: Duration::ZERO,
+                repo: false,
+                head: None,
+            });
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn is_stale(app: &App) -> bool {
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("loaded")
+        };
+        loaded.preview_stale
     }
 
     /// A loaded app for `/proj` with `src/main.rs` and a top-level `README.md`.
@@ -2167,56 +2258,6 @@ mod tests {
         assert!(app.pending_compute.is_none());
     }
 
-    /// #52: an in-place edit under a stationary selection. The walk reports the
-    /// same paths and the same sizes, so `same_skeleton` short-circuits the
-    /// rescan — the preview's freshness check has to run *ahead* of that gate or
-    /// the pane never refreshes at all.
-    #[test]
-    fn a_rescan_marks_the_preview_stale_when_the_file_changed() {
-        let mut app = sample_app();
-        set_panes(&mut app);
-        select(&mut app, "README.md");
-        app.refresh_preview();
-
-        let Screen::Loaded(loaded) = &mut app.screen else {
-            unreachable!("sample_app is loaded")
-        };
-        assert_eq!(loaded.preview_for.as_deref(), Some(Path::new("README.md")));
-        assert!(!loaded.preview_stale);
-        // `/proj` does not exist, so disk answers `None` for the selection. A
-        // stamp taken from some *other*, real file therefore reads as "changed"
-        // — which is what an edited file looks like, without writing anything.
-        loaded.preview.stamp = Stamp::of(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
-        assert!(
-            loaded.preview.stamp.is_some(),
-            "the manifest must be stat-able"
-        );
-
-        // An identical skeleton: same paths, same sizes — exactly the walk an
-        // edit that preserves the file's length produces.
-        let files = vec![
-            (PathBuf::from("src/main.rs"), 1000),
-            (PathBuf::from("README.md"), 200),
-        ];
-        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
-        app.on_rescan(ScanOutcome {
-            tree,
-            duration: Duration::ZERO,
-            repo: false,
-            head: None,
-        });
-
-        let Screen::Loaded(loaded) = &app.screen else {
-            unreachable!("still loaded")
-        };
-        assert!(
-            loaded.preview_stale,
-            "the check must run before the skeleton gate"
-        );
-        // Which is what arms the event loop's debounce to do the actual reload.
-        assert!(app.preview_target_id().is_some());
-    }
-
     /// A refresh caused by the file changing keeps the viewport where it was —
     /// otherwise tailing a log snaps back to line one on every append. A refresh
     /// caused by the selection moving still starts at the top.
@@ -2258,34 +2299,62 @@ mod tests {
         assert_eq!(loaded.preview.state.top(), 0);
     }
 
-    /// The converse: the check is a real comparison, not "always invalidate".
-    /// Without this a `cargo build` in the tree would re-read and re-highlight
-    /// the previewed file on every batch of filesystem events.
+    /// The converse, against a real filesystem: the check is a comparison, not
+    /// "always invalidate". Without this a `cargo build` in the tree would
+    /// re-read and re-highlight the previewed file on every batch of events.
     #[test]
-    fn a_rescan_leaves_an_unchanged_preview_alone() {
-        let mut app = sample_app();
-        set_panes(&mut app);
+    fn a_rescan_leaves_an_unchanged_file_preview_alone() {
+        let root = TempRoot::new("unchanged");
+        let mut app = root.app();
         select(&mut app, "README.md");
         app.refresh_preview();
+        assert!(!is_stale(&app));
 
-        // Both the cached stamp and disk answer `None` for a path under `/proj`,
-        // so they agree and nothing is invalidated.
-        let files = vec![
-            (PathBuf::from("src/main.rs"), 1000),
-            (PathBuf::from("README.md"), 200),
-        ];
-        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
-        app.on_rescan(ScanOutcome {
-            tree,
-            duration: Duration::ZERO,
-            repo: false,
-            head: None,
-        });
+        root.rescan(&mut app);
+        assert!(!is_stale(&app), "an untouched file must not be re-read");
+        assert_eq!(app.preview_target_id(), None);
+    }
 
-        let Screen::Loaded(loaded) = &app.screen else {
-            unreachable!("still loaded")
-        };
-        assert!(!loaded.preview_stale);
+    /// #52 itself, against a real filesystem: an in-place edit under a
+    /// stationary selection, rewritten to an identical length so only the mtime
+    /// half of the stamp can carry it.
+    ///
+    /// The walk therefore reports the same paths and the same sizes, so
+    /// `same_skeleton` short-circuits the rescan — this passes only while the
+    /// freshness check runs *ahead* of that gate.
+    #[test]
+    fn a_rescan_marks_a_real_same_length_edit_stale() {
+        let root = TempRoot::new("edited");
+        let mut app = root.app();
+        select(&mut app, "README.md");
+        app.refresh_preview();
+        assert!(!is_stale(&app));
+
+        root.write("README.md", "# README\n"); // same byte length
+        root.rescan(&mut app);
+        assert!(
+            is_stale(&app),
+            "a same-length rewrite must still be noticed"
+        );
+    }
+
+    /// A directory's own `stat` moves on churn that says nothing about the note
+    /// on screen, and the note carries no stamp to compare — so the freshness
+    /// check must skip it. Otherwise selecting a directory makes every single
+    /// filesystem event rebuild the preview and force a redraw.
+    #[test]
+    fn a_rescan_leaves_a_directory_preview_alone() {
+        let root = TempRoot::new("directory");
+        let mut app = root.app();
+        select(&mut app, "src");
+        app.refresh_preview();
+        assert!(!is_stale(&app));
+
+        root.rescan(&mut app);
+        assert!(
+            !is_stale(&app),
+            "a directory note must not be invalidated by its own stat"
+        );
         assert_eq!(app.preview_target_id(), None);
     }
 
