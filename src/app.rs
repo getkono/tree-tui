@@ -2410,6 +2410,78 @@ mod tests {
         assert_eq!(app.preview_target_id(), None);
     }
 
+    /// The direction a `NodeId` key actually aliased in: cache a preview for a
+    /// file, delete it, and let another file inherit its arena slot. With an id
+    /// key `preview_for` would equal `selected_id()` by coincidence and
+    /// `ensure_preview` would early-return, painting the deleted file's document
+    /// under the surviving file's row.
+    #[test]
+    fn the_preview_cache_does_not_alias_onto_an_inherited_slot() {
+        use crate::ui::fileview::{FileDoc, Limits};
+
+        // `A.md` sorts first among the files, so it takes the lowest file id.
+        let files = vec![
+            (PathBuf::from("A.md"), 1),
+            (PathBuf::from("B.md"), 2),
+            (PathBuf::from("src/main.rs"), 1000),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        let mut app = App::new(PathBuf::from("/proj"), "proj".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+        app.pending_compute = None;
+        set_panes(&mut app);
+
+        let Screen::Loaded(loaded) = &mut app.screen else {
+            unreachable!("loaded")
+        };
+        let doomed = loaded.tree.index[&PathBuf::from("A.md")];
+        // A real document cached for `A.md`, so `reload`'s note drop stays out.
+        let src = b"# a\n";
+        loaded.preview = crate::ui::preview::Preview::from_doc(FileDoc::prepare(
+            Path::new("A.md"),
+            src,
+            src.len() as u64,
+            &Limits::default(),
+        ));
+        loaded.preview_for = Some(PathBuf::from("A.md"));
+
+        // `A.md` is deleted; `B.md` inherits its arena slot exactly.
+        let files = vec![
+            (PathBuf::from("B.md"), 2),
+            (PathBuf::from("src/main.rs"), 1000),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("still loaded")
+        };
+        assert_eq!(
+            loaded.tree.index[&PathBuf::from("B.md")],
+            doomed,
+            "the fixture must actually hand B.md the deleted file's slot"
+        );
+        assert_eq!(
+            loaded.selected_id(),
+            Some(doomed),
+            "and the selection must land on it"
+        );
+        // The cache still names the file it was built from, which no longer
+        // exists — so the pane must reload rather than reuse it for `B.md`.
+        assert_eq!(loaded.preview_for.as_deref(), Some(Path::new("A.md")));
+        assert_eq!(app.preview_target_id(), Some(doomed));
+    }
+
     /// A note-only preview has no stamp to check against disk and is a
     /// `format!` away from correct, so a rescan simply drops it.
     #[test]
