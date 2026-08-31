@@ -749,10 +749,14 @@ impl Loaded {
         if !self.preview_stale && key == self.preview_for {
             return;
         }
+        // Same file, rebuilt because its content changed — as opposed to the
+        // selection having moved to a different one. The two want opposite
+        // scroll behavior, and only this comparison can tell them apart.
+        let same_file = self.preview_stale && key == self.preview_for;
         self.preview_stale = false;
         self.preview_for = key;
         // A fresh `Preview` also resets scroll state for the new content.
-        self.preview = match id {
+        let mut next = match id {
             None => Preview::default(),
             Some(id) if self.tree.nodes[id].is_dir() => {
                 Preview::note(format!("{} — directory", self.display_name(id)))
@@ -762,6 +766,13 @@ impl Loaded {
                 crate::ui::preview::load(&path)
             }
         };
+        // ...which is wrong when the file merely changed under a stationary
+        // selection: a tailed log would snap back to line one on every append,
+        // and a PDF back to page one.
+        if same_file {
+            next.state.adopt_position(&self.preview.state);
+        }
+        self.preview = next;
     }
 
     /// Mark the preview stale when the file it was built from has changed on
@@ -2204,6 +2215,47 @@ mod tests {
         );
         // Which is what arms the event loop's debounce to do the actual reload.
         assert!(app.preview_target_id().is_some());
+    }
+
+    /// A refresh caused by the file changing keeps the viewport where it was —
+    /// otherwise tailing a log snaps back to line one on every append. A refresh
+    /// caused by the selection moving still starts at the top.
+    #[test]
+    fn a_content_refresh_keeps_the_scroll_position_but_a_new_selection_does_not() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "README.md");
+        app.refresh_preview();
+
+        let Screen::Loaded(loaded) = &mut app.screen else {
+            unreachable!("sample_app is loaded")
+        };
+        loaded.preview.state.scroll_down(40);
+        assert_eq!(loaded.preview.state.top(), 40);
+        // Make the cached stamp disagree with disk, then take the same path the
+        // event loop takes after `$EDITOR` returns.
+        loaded.preview.stamp = Stamp::of(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
+        app.recheck_preview();
+        app.refresh_preview();
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("still loaded")
+        };
+        assert_eq!(
+            loaded.preview.state.top(),
+            40,
+            "a same-file refresh must not scroll the reader back to the top"
+        );
+
+        // Moving the selection is a different document: start at the top.
+        select(&mut app, "src");
+        app.update(Action::Expand);
+        select(&mut app, "main.rs");
+        app.refresh_preview();
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("still loaded")
+        };
+        assert_eq!(loaded.preview.state.top(), 0);
     }
 
     /// The converse: the check is a real comparison, not "always invalidate".

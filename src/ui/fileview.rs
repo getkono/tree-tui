@@ -361,6 +361,24 @@ impl FileViewState {
         self.editor.scroll_line
     }
 
+    /// Take `prev`'s viewport position — scroll offsets and PDF page — leaving
+    /// everything else fresh.
+    ///
+    /// For rebuilding a document over *the same file* after it changed on disk:
+    /// resetting to the top there would snap a tailed log back to line one on
+    /// every append. Offsets are clamped at render time, so a file that got
+    /// shorter needs nothing further.
+    ///
+    /// Deliberately does not carry `pending_image` or the rasterized PDF page:
+    /// both describe the *old* bytes, and reusing them would paint the previous
+    /// content over the new document.
+    pub fn adopt_position(&mut self, prev: &Self) {
+        self.editor.scroll_line = prev.editor.scroll_line;
+        self.hex_scroll = prev.hex_scroll;
+        self.page = prev.page;
+        self.doc_page = prev.doc_page;
+    }
+
     /// Scroll down by `lines` (text lines, or hex rows). Clamped when rendered.
     pub fn scroll_down(&mut self, lines: u32) {
         self.editor.scroll_line = self.editor.scroll_line.saturating_add(lines);
