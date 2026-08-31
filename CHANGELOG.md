@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/getkono/tree-tui/compare/v0.1.3...v0.2.0) - 2026-08-31
+
+### Added
+
+- *(tree)* show a file-type icon on every row
+- *(fileview)* [**breaking**] migrate to karet 0.6 and own the file-view dispatch
+
+### Fixed
+
+- *(event)* arm the preview debounce against the layout the frame used
+- *(preview)* skip the freshness check for note-only previews
+- *(fileview)* key the Kitty placement on the document's file stamp
+- *(preview)* keep scroll and page across a content refresh
+- *(preview)* refresh the preview when the file changes on disk
+- *(cli)* default --icons to the tier every font can render
+- *(tui)* send the Kitty delete escape only to a Kitty terminal
+- *(fileview)* redraw the terminal image after the screen is handed away
+- *(reader)* page by the lines actually shown, and settle the viewport before titling it
+
+### Other
+
+- *(app)* cover the direction the NodeId key actually aliased in
+- record the preview-freshness design
+- *(app)* key the preview cache on the previewed path
+- *(deps)* update all dependencies to latest
+- *(deps)* bump gix from 0.85 to 0.87
+- *(fileview)* say what the placement key proves, and fix the renamed links
+- *(fileview)* stop retransmitting an unchanged terminal image
+- describe the file view tree-tui now owns
+
 ## [0.1.3](https://github.com/getkono/tree-tui/compare/v0.1.2...v0.1.3) - 2026-07-02
 
 ### Added
