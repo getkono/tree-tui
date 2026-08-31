@@ -42,7 +42,7 @@ futures = "0.3"
 ignore = "0.4"
 # Pure-Rust git (no external binary, no C toolchain) for the churn/status lenses.
 # Keep gix's defaults (they pull in the hash backend) and add what the lenses need.
-gix = { version = "0.85", features = ["revision", "blob-diff", "status", "dirwalk"] }
+gix = { version = "0.87", features = ["revision", "blob-diff", "status", "dirwalk"] }
 ratatui = "0.30.2"
 # The karet toolkit. `karet-fileview` ships only the read-only primitives (hex
 # dump, terminal image, placeholder) + `classify`; composing them with the editor
