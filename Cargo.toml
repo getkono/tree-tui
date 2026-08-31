@@ -2,7 +2,7 @@
 name = "tree-tui"
 version = "0.1.3"
 edition = "2024"
-rust-version = "1.90"                  # floor is set by the karet-fileview chain (edition 2024 + ratatui 0.30)
+rust-version = "1.92"                  # floor is set by the karet chain (edition 2024 + ratatui 0.30)
 description = "An interactive terminal UI for visualizing directories: code, size, and git stats."
 authors = ["Justin Chung"]
 license = "MIT OR Apache-2.0"
@@ -14,6 +14,18 @@ keywords = ["tui", "ratatui", "cli", "directory", "filesystem"]
 categories = ["command-line-utilities", "visualization"]
 # Keep the published tarball to what's needed to build the crate.
 exclude = ["/.github", "/AGENTS.md", "/CLAUDE.md", "/Cross.toml", "/hk.pkl", "/mise.toml", "/release-plz.toml", "/scripts", "/assets"]
+
+# Media renderers are default-on, mirroring karet: `--no-default-features` drops
+# their dependency trees and routes those files to a placeholder instead.
+[features]
+default = ["images", "pdf"]
+# The shared terminal-image primitives (Kitty escape + halfblock rendering).
+# Implied by both `images` and `pdf`; rarely selected directly.
+raster = ["karet-fileview/raster"]
+# Decode and render raster image files (adds the pure-Rust PNG/JPEG/WebP/TIFF codecs).
+images = ["raster", "karet-fileview/images"]
+# Rasterize PDF pages for the Kitty graphics path.
+pdf = ["raster", "dep:karet-pdf"]
 
 # The binary is invoked as `tree [dir]` (note: shadows the system `tree` once installed).
 [[bin]]
@@ -32,8 +44,22 @@ ignore = "0.4"
 # Keep gix's defaults (they pull in the hash backend) and add what the lenses need.
 gix = { version = "0.85", features = ["revision", "blob-diff", "status", "dirwalk"] }
 ratatui = "0.30.2"
-karet-fileview = { version = "0.1.0", features = ["all-languages"] }
-karet-core = "0.1.0"
+# The karet toolkit. `karet-fileview` ships only the read-only primitives (hex
+# dump, terminal image, placeholder) + `classify`; composing them with the editor
+# and the tree-sitter stack into one "render any file" view is our job — see
+# `src/ui/fileview.rs`. All `karet-*` crates release in lockstep, so they move
+# together.
+karet-core = "0.6.0"
+karet-editor = "0.6.0"
+karet-filetype = "0.6.0"
+karet-fileview = { version = "0.6.0", default-features = false }
+karet-pdf = { version = "0.6.0", optional = true }
+karet-syntax = "0.6.0"
+karet-text = "0.6.0"
+karet-theme = { version = "0.6.0", features = ["view"] }
+# The grammars live on the parse host; karet-syntax's `lang-*` are pass-throughs,
+# so enabling the bundle here covers the whole highlight path.
+karet-treesitter = { version = "0.6.0", features = ["all-languages"] }
 thiserror = "2.0.18"
 tokei = { version = "14", default-features = false }
 tokio = { version = "1.52.3", features = ["full"] }

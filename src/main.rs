@@ -29,6 +29,7 @@ use std::process::ExitCode;
 use app::App;
 use cli::Command;
 use error::AppError;
+use karet_filetype::IconStyle;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -48,9 +49,10 @@ async fn main() -> ExitCode {
             println!("{}", cli::usage());
             ExitCode::SUCCESS
         }
-        Ok(Command::Run { dir }) => {
+        Ok(Command::Run { dir, icons }) => {
             let _log_guard = logging::init();
-            match run(dir).await {
+            let icons = cli::resolve_icons(icons, std::env::var(cli::ICONS_ENV).ok().as_deref());
+            match run(dir, icons).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     // Concise, chained message for expected errors; the
@@ -70,16 +72,17 @@ async fn main() -> ExitCode {
 
 /// Validate the target directory, then run the TUI, restoring the terminal on
 /// every exit path.
-async fn run(dir: PathBuf) -> color_eyre::Result<()> {
+async fn run(dir: PathBuf, icons: IconStyle) -> color_eyre::Result<()> {
     let root = validate_dir(&dir)?;
     let label = root_label(&dir, &root);
     tracing::info!(target = %root.display(), "tree starting");
 
+    ui::theme::set_icon_style(icons);
     let mut app = App::new(root, label);
-    // Images in the preview / reader render through `karet-fileview`'s truecolor
-    // half-block backend (its `GraphicsProtocol::Halfblocks` default): env-only
-    // detection, no stdin probe, so it never collides with crossterm's event
-    // reader — the pitfall that made `ratatui-image`'s query picker freeze input.
+    // Images in the preview / reader use the Kitty graphics protocol where the
+    // terminal speaks it and truecolor half-blocks everywhere else. Detection is
+    // env-only — no stdin probe — so it never collides with crossterm's event
+    // reader, the pitfall that made `ratatui-image`'s query picker freeze input.
     let mut terminal = tui::init()?;
     let result = event::run(&mut terminal, &mut app).await;
     tui::restore();

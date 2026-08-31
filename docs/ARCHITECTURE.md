@@ -38,11 +38,27 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
 - `event` — the `tokio::select!` loop: input, walk completion, lens results, spinner ticks.
 - `ui` — the render scaffold (header / tree table / detail / footer / help) driven by the active lens.
 
-File viewing is not part of the metric core: the inline **preview** pane (`ui::preview`) and the
-full-screen **reader** (`ui::reader`) both delegate rendering to the external **`karet-fileview`**
-widget — one `FileDoc::prepare` (classify + decode/parse/highlight, cached per selection) feeding a
-`FileView`/`FileViewState`. tree-tui keeps only the glue: bounded reads, scroll/search state, the
-`$EDITOR`/`$PAGER` handoffs, and the suspended-tree ownership.
+File viewing is not part of the metric core. The inline **preview** pane (`ui::preview`) and the
+full-screen **reader** (`ui::reader`) both render through **`ui::fileview`**, which composes the
+karet toolkit into one "render any file" widget: `FileDoc::prepare` classifies the bytes and
+decodes / parses / highlights them once per opened file, and `FileView` dispatches that payload to
+a primitive every frame — `karet-editor`'s read-only editor for text, `karet-fileview`'s `HexView`
+for binaries, its terminal image renderer for images and rasterized PDF pages, and its placeholder
+for everything else. `FileViewState` carries the scroll position across frames, so the two callers
+keep only their own glue: bounded reads, search state, the `$EDITOR`/`$PAGER` handoffs, and the
+suspended-tree ownership.
+
+Two things the dispatch owns are worth knowing about:
+
+- **The highlight budget.** Parsing is `O(file)`, so `prepare` skips it above a line budget (500
+  lines for the preview, 20 000 for the reader) and renders the text unhighlighted. Nothing in
+  karet enforces this; without it the preview pane stalls the loop on a large file.
+- **The Kitty handshake.** A Kitty graphics placement is not part of the cell buffer, so the
+  widget only *reserves* a rect during the frame and `event::draw` transmits the pixels after
+  `terminal.draw`. The same seam clears the placement whenever a frame stops showing one — a new
+  selection, the help overlay, the pane folding away, teardown — since redrawing the cells
+  underneath would not remove it. Terminals without Kitty get truecolor half-blocks instead, and
+  detection is env-only so it never races crossterm's event reader.
 
 **Modular tools:**
 

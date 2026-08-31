@@ -1,6 +1,7 @@
 //! Rendering: dispatch by screen state and lay out the top-level regions.
 
 mod detail;
+pub mod fileview;
 mod footer;
 mod header;
 mod help;
@@ -115,6 +116,10 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
         // event loop so a held key / wheel spin never pays a file read + syntax
         // highlight per frame (that synchronous cost is what made nav lurch).
         preview::render(frame, loaded, preview_area);
+    } else {
+        // The pane folded away: retract any Kitty reservation it left behind, or
+        // the post-draw flush would paint its image over the widened tree.
+        loaded.preview.state.clear_pending_image();
     }
 
     let computing = loaded.active_computing().then_some(loaded.active_lens);
@@ -422,7 +427,7 @@ mod tests {
         // the renderer's `ensure_preview` won't overwrite our injected content.
         if let Screen::Loaded(loaded) = &mut app.screen {
             let src = b"fn main() {}\nlet x = 1;\n";
-            let doc = karet_fileview::FileDoc::prepare(
+            let doc = super::fileview::FileDoc::prepare(
                 std::path::Path::new("x.rs"),
                 src,
                 src.len() as u64,

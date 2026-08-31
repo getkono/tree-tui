@@ -35,8 +35,31 @@ pub fn init() -> std::io::Result<DefaultTerminal> {
     Ok(terminal)
 }
 
+/// Delete any Kitty graphics placement this process left on the terminal.
+///
+/// Both teardown paths need this and neither has placement state left to
+/// consult, so it clears everything. Unlike the per-frame path — which only
+/// transmits from a rect the Kitty branch reserved — these run blind, so the
+/// protocol check happens here: a terminal that never spoke Kitty is not sent
+/// an APC it would only have to swallow. A no-op without `raster`, which
+/// compiles the image path out entirely.
+fn clear_terminal_graphics() {
+    #[cfg(feature = "raster")]
+    {
+        use crate::ui::fileview;
+
+        // `clear_kitty_images` flushes what it writes.
+        let _ = fileview::clear_kitty_images(fileview::graphics_protocol(), &mut std::io::stdout());
+    }
+}
+
 /// Leave raw mode + the alternate screen.
+///
+/// Kitty graphics placements are not part of the alternate screen's cell buffer,
+/// so any image the file view transmitted has to be deleted explicitly or it
+/// survives on the shell the user comes back to.
 pub fn restore() {
+    clear_terminal_graphics();
     let _ = set_mouse_capture(false);
     pop_keyboard_enhancement();
     ratatui::restore();
@@ -87,6 +110,10 @@ pub fn suspended<T>(terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> st
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
 
+    // Delete any terminal-graphics image before handing the screen over: a
+    // placement is not part of the cell buffer, so it can outlive the alternate
+    // screen and land on top of the program we are about to run.
+    clear_terminal_graphics();
     pop_keyboard_enhancement();
     // Hand the mouse back so the external program (and its native selection)
     // behaves normally; re-grab on return only if we had it.
