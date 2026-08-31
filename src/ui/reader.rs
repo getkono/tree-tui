@@ -88,6 +88,20 @@ pub struct Reader {
     /// File size in bytes, for the title bar.
     pub bytes: u64,
     /// The prepared document rendered in the body.
+    ///
+    /// Deliberately a **snapshot**: it is prepared once at [`Reader::open`] and
+    /// never refreshed, even though a rescan behind the reader does mark the
+    /// suspended tree's preview stale. Re-preparing under a scrolled, folded,
+    /// mid-search reader would discard exactly the state that makes the reader
+    /// useful — and the fold regions and search hits it would be preserving were
+    /// computed from bytes that no longer exist, so "preserving" them is
+    /// approximate at best. Reopening the file is one keypress.
+    ///
+    /// Known exception, deliberately left: returning from
+    /// [`Handoff::EditAtLine`], where the user edited this file *through this
+    /// view* and comes back to pre-edit bytes, a stale `text` for search, and
+    /// stale folds. Refreshing there would be defensible; it wants its own
+    /// change.
     doc: FileDoc,
     /// Scroll (and image-reserve) state for the view.
     state: FileViewState,

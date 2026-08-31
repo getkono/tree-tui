@@ -4,8 +4,14 @@
 //! code (tree-sitter), an inline image (Kitty graphics, or truecolor half-blocks
 //! where the terminal can't), a hex dump for binaries, or a placeholder for
 //! oversized / undecodable files. Content is prepared once from a bounded prefix
-//! and cached on the [`Loaded`] state, refreshed only when the selection changes
-//! (see `Loaded::ensure_preview`).
+//! and cached on the [`Loaded`] state.
+//!
+//! The cache is rebuilt on two triggers, and `Loaded::ensure_preview` tells them
+//! apart because they want different scroll behavior: the selection moving to
+//! another file (start at the top), and the previewed file itself changing on
+//! disk (hold the viewport). The second is detected by comparing the [`Stamp`]
+//! recorded here against a fresh `stat` — see
+//! `Loaded::mark_preview_stale_if_changed`, which runs on every rescan.
 
 use std::path::Path;
 

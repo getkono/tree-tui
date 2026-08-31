@@ -48,7 +48,7 @@ for everything else. `FileViewState` carries the scroll position across frames, 
 keep only their own glue: bounded reads, search state, the `$EDITOR`/`$PAGER` handoffs, and the
 suspended-tree ownership.
 
-Two things the dispatch owns are worth knowing about:
+Three things the dispatch owns are worth knowing about:
 
 - **The highlight budget.** Parsing is `O(file)`, so `prepare` skips it above a line budget (500
   lines for the preview, 20 000 for the reader) and renders the text unhighlighted. Nothing in
@@ -59,6 +59,14 @@ Two things the dispatch owns are worth knowing about:
   selection, the help overlay, the pane folding away, teardown — since redrawing the cells
   underneath would not remove it. Terminals without Kitty get truecolor half-blocks instead, and
   detection is env-only so it never races crossterm's event reader.
+- **Freshness.** A prepared document is a snapshot, so something has to notice when the file it
+  came from changes. `ui::preview::load` records the file's length and mtime as a `Stamp`, and
+  `App::on_rescan` re-stats the previewed path on every watcher signal — *before* the
+  `same_skeleton` gate, which compares paths and sizes and so would otherwise swallow an
+  in-place edit of the same length. A mismatch marks the preview stale, which arms the same
+  80 ms debounce a selection move does, so the read and the parse stay off the navigation
+  frames. The reader's document is deliberately exempt: it holds its snapshot rather than
+  discarding a scrolled, folded, mid-search view.
 
 **Modular tools:**
 
