@@ -179,6 +179,11 @@ pub struct FileDoc {
     path: PathBuf,
     dims: Option<(u32, u32)>,
     len: u64,
+    /// What the file looked like when this was prepared, where the caller knew
+    /// (see [`FileDoc::with_stamp`]). Read only by [`Placement`], hence the
+    /// `dead_code` allowance without the `raster` feature.
+    #[cfg_attr(not(feature = "raster"), allow(dead_code))]
+    stamp: Option<Stamp>,
 }
 
 impl FileDoc {
@@ -227,7 +232,21 @@ impl FileDoc {
             path: path.to_path_buf(),
             dims,
             len,
+            stamp: None,
         }
+    }
+
+    /// Record what the file looked like when these bytes were read.
+    ///
+    /// A builder rather than a `prepare` parameter so the classification path
+    /// stays a pure function of the bytes. Callers that stat the file anyway —
+    /// the preview loader and the reader — should pass the stamp through; it is
+    /// what stops [`sync_kitty_image`] from leaving a stale image on the
+    /// terminal after a rewrite that happened to preserve the file's length.
+    #[must_use]
+    pub fn with_stamp(mut self, stamp: Option<Stamp>) -> Self {
+        self.stamp = stamp;
+        self
     }
 
     /// The display language name for a text file (e.g. `"Rust"`), or `None` for
@@ -629,17 +648,20 @@ impl StatefulWidget for FileView<'_> {
 pub struct Placement {
     rect: Rect,
     path: PathBuf,
-    /// The file's length, which separates a placement from a *different* file
-    /// that happens to sit at the same path, rect, and page.
+    /// What the document was prepared from, which separates this placement both
+    /// from a *different* file at the same path, rect and page, and from an
+    /// *edited* one.
     ///
-    /// It is not a freshness check: a rewrite to the identical length compares
-    /// equal here. That costs nothing today, because the decision is made
-    /// further up — `Loaded::ensure_preview` keys on `NodeId` and reloads only
-    /// when the selection moves, and `Loaded::same_skeleton` gates a rescan on
-    /// path + length, so the selected file's document is not rebuilt on an
-    /// in-place edit at all. Keying this on mtime would not change that; the
-    /// refresh has to be fixed where it is decided.
-    len: u64,
+    /// The second half matters because the decision above it now allows it to:
+    /// `Loaded::mark_preview_stale_if_changed` rebuilds the document when the
+    /// file changes under a stationary selection, so a rewrite that preserved
+    /// the file's length would otherwise reach here, compare equal on length
+    /// alone, and leave the terminal showing the previous image — a placement
+    /// survives any amount of repainting beneath it.
+    ///
+    /// `None` where the caller never stat'd the file, in which case this
+    /// degrades to the path-and-rect comparison it used to be.
+    stamp: Option<Stamp>,
     /// The PDF page on screen; always 0 for a raster image.
     page: usize,
 }
@@ -678,7 +700,7 @@ pub fn sync_kitty_image(
         let placement = Placement {
             rect: state.pending_image?,
             path: doc.path.clone(),
-            len: doc.len,
+            stamp: doc.stamp,
             page: state.doc_page,
         };
         Some((placement, img?))
@@ -1061,6 +1083,52 @@ trailer<</Size 4/Root 1 0 R>>\n%%EOF";
             String::from_utf8_lossy(&kitty).contains("\x1b_Ga=d"),
             "expected a Kitty delete-all"
         );
+    }
+
+    /// A rewrite that happens to preserve the file's length must still
+    /// retransmit. The placement lives in the terminal rather than the cell
+    /// buffer, so repainting the cells beneath it leaves the old image visible;
+    /// only an unequal placement key tears it down.
+    #[cfg(all(feature = "raster", feature = "pdf"))]
+    #[test]
+    fn an_edited_file_retransmits_even_at_the_same_length() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let before = Stamp::of(&manifest.join("Cargo.toml"));
+        let after = Stamp::of(&manifest.join("src/main.rs"));
+        assert!(before.is_some() && after.is_some());
+        assert_ne!(before, after, "the fixture needs two distinct stamps");
+
+        let area = Rect::new(0, 0, 40, 20);
+        let mut shown = None;
+
+        let mut flush = |stamp| {
+            let doc = FileDoc::prepare(
+                Path::new("a.pdf"),
+                MINIMAL_PDF,
+                MINIMAL_PDF.len() as u64,
+                &Limits::default(),
+            )
+            .with_stamp(stamp);
+            let mut state = FileViewState::new();
+            let mut buf = Buffer::empty(area);
+            FileView::new(&doc)
+                .graphics(GraphicsProtocol::Kitty)
+                .render(area, &mut buf, &mut state);
+            let mut out = Vec::new();
+            sync_kitty_image(Some((&doc, &state)), &mut shown, &mut out)
+                .expect("a Vec never fails");
+            out
+        };
+
+        assert!(!flush(before).is_empty(), "the first frame transmits");
+        // Identical bytes, rect and page; only the stamp differs — which is what
+        // a same-length rewrite of the file on disk looks like from here.
+        assert!(
+            !flush(after).is_empty(),
+            "a changed file must retransmit: the old image is still on screen"
+        );
+        // And an unchanged one still must not — a PDF page is megabytes.
+        assert!(flush(after).is_empty(), "an unchanged placement must not");
     }
 
     /// `Stamp::of` answers for a real file and reports `None` — not an error —

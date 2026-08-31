@@ -103,7 +103,7 @@ pub fn load(path: &Path) -> Preview {
             };
         }
     };
-    let doc = FileDoc::prepare(path, &bytes, len, &limits);
+    let doc = FileDoc::prepare(path, &bytes, len, &limits).with_stamp(stamp);
     // A text/markdown document exposes a language; keep its text for `y` yank.
     let yank = doc
         .language()
