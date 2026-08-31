@@ -107,15 +107,6 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
             },
         }
 
-        // (Re)arm the preview debounce when the selection moves to a new,
-        // not-yet-cached node; while navigating it keeps getting pushed out, so
-        // the highlight runs only once the selection settles (~one debounce).
-        let target = app.preview_target_id();
-        if target != preview_target {
-            preview_target = target;
-            preview_deadline = target.map(|_| tokio::time::Instant::now() + PREVIEW_DEBOUNCE);
-        }
-
         // Drain a requested lens computation onto a blocking thread.
         if let Some(lens) = app.pending_compute.take() {
             let tx = lens_tx.clone();
@@ -130,6 +121,22 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
         }
         if redraw {
             draw(terminal, app, &mut kitty)?;
+        }
+
+        // (Re)arm the preview debounce when the selection moves to a new,
+        // not-yet-cached node, or when the file on screen changed underneath it;
+        // while navigating it keeps getting pushed out, so the highlight runs
+        // only once the selection settles (~one debounce).
+        //
+        // After the draw, not before: `preview_target_id` gates on the pane
+        // rects, and those are recorded *by* the draw. Arming against last
+        // frame's layout loses a pending refresh across a resize — the pane
+        // folds away, the deadline is cancelled, and widening again re-arms
+        // against the folded rects and so does not re-arm at all.
+        let target = app.preview_target_id();
+        if target != preview_target {
+            preview_target = target;
+            preview_deadline = target.map(|_| tokio::time::Instant::now() + PREVIEW_DEBOUNCE);
         }
     }
     Ok(())

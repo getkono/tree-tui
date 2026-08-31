@@ -394,8 +394,10 @@ impl FileViewState {
     pub fn adopt_position(&mut self, prev: &Self) {
         self.editor.scroll_line = prev.editor.scroll_line;
         self.hex_scroll = prev.hex_scroll;
-        self.page = prev.page;
         self.doc_page = prev.doc_page;
+        // `page` is not carried: `render` recaptures it from the area every
+        // frame, and every reader of it fires from a key event, which always
+        // follows a draw. Copying it here would be dead.
     }
 
     /// Scroll down by `lines` (text lines, or hex rows). Clamped when rendered.

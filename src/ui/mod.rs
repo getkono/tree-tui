@@ -423,8 +423,10 @@ mod tests {
     fn renders_focused_text_preview_with_line_numbers() {
         use crate::app::Focus;
         let mut app = sample_app();
-        // Inject a text preview, focus the preview pane, and pin the cache key so
-        // the renderer's `ensure_preview` won't overwrite our injected content.
+        // Inject a text preview, focus the preview pane, and pin the cache key.
+        // The renderer never loads a preview itself (see `Loaded::ensure_preview`),
+        // but a matching key keeps the injected content current for any path that
+        // does.
         if let Screen::Loaded(loaded) = &mut app.screen {
             let src = b"fn main() {}\nlet x = 1;\n";
             let doc = super::fileview::FileDoc::prepare(
