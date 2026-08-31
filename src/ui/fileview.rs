@@ -13,7 +13,7 @@
 //!
 //! Images render through the Kitty graphics protocol when the terminal speaks it
 //! and truecolor half-blocks otherwise. The Kitty path paints nothing into the
-//! ratatui buffer: it *reserves* a rect and leaves [`flush_kitty_image`] to
+//! ratatui buffer: it *reserves* a rect and leaves [`sync_kitty_image`] to
 //! transmit the pixels after `terminal.draw` (see `crate::event`).
 
 #[cfg(feature = "raster")]
@@ -275,7 +275,7 @@ pub fn graphics_protocol() -> GraphicsProtocol {
 }
 
 /// The persistent per-view state: scroll position and, for the Kitty image path,
-/// the rect reserved this frame (see [`flush_kitty_image`]).
+/// the rect reserved this frame (see [`sync_kitty_image`]).
 ///
 /// The scroll helpers drive the text and hex branches at once; only the active
 /// branch's scroll is read when rendering, so a caller can move the viewport
@@ -293,7 +293,7 @@ pub struct FileViewState {
     /// and sticky headers eat rows off the top), and hex rows otherwise.
     page: u16,
     /// The rect reserved for a Kitty image this frame, consumed by
-    /// [`flush_kitty_image`]. `None` for every other branch/protocol.
+    /// [`sync_kitty_image`]. `None` for every other branch/protocol.
     pending_image: Option<Rect>,
     /// The current 0-based page for a PDF branch.
     doc_page: usize,
@@ -393,7 +393,7 @@ impl FileViewState {
 /// PDF page, a hex dump, or a placeholder — dispatching on the document's kind.
 ///
 /// Search matches (or any overlay) are supplied as [`Decoration`]s and painted on
-/// the text branch. For the Kitty image path, call [`flush_kitty_image`] once
+/// the text branch. For the Kitty image path, call [`sync_kitty_image`] once
 /// after `terminal.draw(...)`; the half-block path is self-contained.
 pub struct FileView<'a> {
     doc: &'a FileDoc,
@@ -566,7 +566,16 @@ impl StatefulWidget for FileView<'_> {
 pub struct Placement {
     rect: Rect,
     path: PathBuf,
-    /// The file's length, so a file replaced in place is redrawn.
+    /// The file's length, which separates a placement from a *different* file
+    /// that happens to sit at the same path, rect, and page.
+    ///
+    /// It is not a freshness check: a rewrite to the identical length compares
+    /// equal here. That costs nothing today, because the decision is made
+    /// further up — `Loaded::ensure_preview` keys on `NodeId` and reloads only
+    /// when the selection moves, and `Loaded::same_skeleton` gates a rescan on
+    /// path + length, so the selected file's document is not rebuilt on an
+    /// in-place edit at all. Keying this on mtime would not change that; the
+    /// refresh has to be fixed where it is decided.
     len: u64,
     /// The PDF page on screen; always 0 for a raster image.
     page: usize,
