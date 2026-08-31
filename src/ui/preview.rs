@@ -15,7 +15,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
-use super::fileview::{self, FileDoc, FileView, FileViewState, Limits};
+use super::fileview::{self, FileDoc, FileView, FileViewState, Limits, Stamp};
 use super::theme;
 use crate::app::{Focus, Loaded};
 
@@ -43,6 +43,15 @@ pub struct Preview {
     pub yank: Option<String>,
     /// Scroll state for the view; reset when the selection changes.
     pub state: FileViewState,
+    /// What the file looked like when this was built, for the freshness check
+    /// in `Loaded::mark_preview_stale_if_changed`.
+    ///
+    /// `None` only where the file could not be stat'd at all (and for a
+    /// directory, whose note has no content to go stale). A *read* failure
+    /// still records the stamp: left `None` it would compare unequal to disk
+    /// forever, so every filesystem event under the root — a `cargo build`,
+    /// say — would re-open and re-fail the same unreadable file.
+    pub stamp: Option<Stamp>,
 }
 
 impl Preview {
@@ -62,14 +71,22 @@ impl Preview {
             note: None,
             yank: None,
             state: FileViewState::new(),
+            stamp: None,
         }
     }
 }
 
 /// Build the preview for `path` (a file), reading at most a bounded prefix.
 pub fn load(path: &Path) -> Preview {
-    let len = match std::fs::metadata(path) {
-        Ok(meta) => meta.len(),
+    // Stat first, read second, and keep it that way. A write landing between
+    // the two stores the *older* stamp against the *newer* bytes, which costs
+    // one redundant reload and converges. Stat'ing from the open handle instead
+    // would store a stamp describing content that was never read — and that
+    // change would then be invisible forever.
+    let (len, stamp) = match std::fs::metadata(path) {
+        Ok(meta) => (meta.len(), Some(Stamp::from_metadata(&meta))),
+        // Unstat-able: no stamp to record, and `Stamp::of` will keep answering
+        // `None` too, so this compares equal and does not re-read on every event.
         Err(err) => return Preview::note(format!("cannot read file: {err}")),
     };
     let limits = preview_limits();
@@ -77,7 +94,14 @@ pub fn load(path: &Path) -> Preview {
     // `prepare` classifies it `TooLarge` from `len` without reading the body.
     let bytes = match read_bounded(path, limits.max_bytes) {
         Ok(bytes) => bytes,
-        Err(err) => return Preview::note(format!("cannot read file: {err}")),
+        // Stat'able but unreadable (mode 000, an I/O error). The stamp is real
+        // and must be kept, or this file re-opens and re-fails on every event.
+        Err(err) => {
+            return Preview {
+                stamp,
+                ..Preview::note(format!("cannot read file: {err}"))
+            };
+        }
     };
     let doc = FileDoc::prepare(path, &bytes, len, &limits);
     // A text/markdown document exposes a language; keep its text for `y` yank.
@@ -90,6 +114,7 @@ pub fn load(path: &Path) -> Preview {
         note: None,
         yank,
         state: FileViewState::new(),
+        stamp,
     }
 }
 

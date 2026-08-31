@@ -203,6 +203,10 @@ fn apply_event(
             // we believed was on screen no longer is.
             if drain_pending_edit(terminal, app)? | drain_reader_handoff(terminal, app)? {
                 kitty.forget();
+                // `$EDITOR` very likely just rewrote the previewed file, and the
+                // watcher may not exist at all (see `watch::spawn`), so ask disk
+                // directly rather than waiting for a signal that may never come.
+                app.recheck_preview();
             }
             drain_pending_capture(app);
             true

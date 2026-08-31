@@ -22,6 +22,7 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::SystemTime;
 
 #[cfg(any(feature = "images", feature = "pdf"))]
 use karet_core::ThemeRole;
@@ -46,6 +47,50 @@ use ratatui::widgets::{StatefulWidget, Widget};
 
 /// How many leading bytes to sample for file-type classification.
 const HEAD_BYTES: usize = 8192;
+
+/// What a file looked like when a document was prepared from it.
+///
+/// Compared against a fresh `stat` to decide whether a cached document still
+/// describes what is on disk. Two caveats, both deliberate:
+///
+/// - Where `modified()` is unavailable this degrades to a length-only
+///   comparison — silently, and to exactly the behavior that preceded it.
+/// - A rewrite that preserves *both* length and mtime is undetectable:
+///   `cp -p`, `rsync -t`, `tar -x`, or an edit landing inside one tick on a
+///   coarse-granularity filesystem. Those keep the stale document until the
+///   selection moves, which is the pre-existing behavior, not a new failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Stamp {
+    len: u64,
+    mtime: Option<SystemTime>,
+}
+
+impl Stamp {
+    /// The stamp described by an already-read `Metadata`.
+    ///
+    /// Prefer this over [`Stamp::of`] wherever the caller has just stat'd the
+    /// file for another reason: two independent stats can straddle a write and
+    /// disagree.
+    #[must_use]
+    pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self {
+            len: meta.len(),
+            mtime: meta.modified().ok(),
+        }
+    }
+
+    /// Stat `path`, or `None` where it cannot be stat'd.
+    ///
+    /// `None` is an answer, not an error: it compares unequal to every `Some`,
+    /// so a file that has been deleted or made unstat-able invalidates a cached
+    /// document exactly like a file whose content changed.
+    #[must_use]
+    pub fn of(path: &Path) -> Option<Self> {
+        std::fs::metadata(path)
+            .ok()
+            .map(|m| Self::from_metadata(&m))
+    }
+}
 
 /// The bytes shown per hex row (matches `karet_fileview::HexView`).
 const HEX_ROW_WIDTH: usize = 16;
@@ -998,6 +1043,18 @@ trailer<</Size 4/Root 1 0 R>>\n%%EOF";
             String::from_utf8_lossy(&kitty).contains("\x1b_Ga=d"),
             "expected a Kitty delete-all"
         );
+    }
+
+    /// `Stamp::of` answers for a real file and reports `None` — not an error —
+    /// for one that cannot be stat'd, which is what makes a deleted file compare
+    /// unequal to a cached document.
+    #[test]
+    fn stamp_reads_a_real_file_and_reports_nothing_for_a_missing_one() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let stamp = Stamp::of(&manifest).expect("the manifest is stat-able");
+        assert_eq!(Some(stamp), Stamp::of(&manifest), "a stamp must be stable");
+        assert!(stamp.len > 0);
+        assert_eq!(Stamp::of(&manifest.join("nope/absent.rs")), None);
     }
 
     #[cfg(feature = "raster")]

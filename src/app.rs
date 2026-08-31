@@ -6,7 +6,7 @@ use std::time::Duration;
 
 #[cfg(feature = "raster")]
 use crate::ui::fileview::FileDoc;
-use crate::ui::fileview::FileViewState;
+use crate::ui::fileview::{FileViewState, Stamp};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Rect};
 use ratatui::widgets::{Row, TableState};
@@ -133,6 +133,14 @@ pub struct Loaded {
     /// Cached preview content (document, scroll state, yank text) for the
     /// selected node.
     pub preview: Preview,
+    /// Whether the cached preview describes a file that has since changed on
+    /// disk. Set by `mark_preview_stale_if_changed`, cleared by
+    /// `ensure_preview`.
+    ///
+    /// A separate flag rather than clearing `preview_for`, so `ensure_preview`
+    /// can still tell a *content* refresh from a *moved selection* — the two
+    /// want different scroll behavior.
+    pub preview_stale: bool,
     /// Which pane has keyboard focus (and the highlighted border).
     pub focus: Focus,
     /// Pane rectangles from the last render, for mouse hit-testing.
@@ -275,12 +283,25 @@ impl App {
     /// paths absent from the walk — cost only a cheap re-walk. Otherwise the
     /// tree is rebuilt (preserving expansion and selection by path) and the
     /// cached metric layers are invalidated, with the active lens re-requested.
+    ///
+    /// The preview's freshness check runs **before** the skeleton gate. That
+    /// gate compares paths and sizes only, so it is exactly what swallows an
+    /// in-place edit of the same length — checking after it would fix nothing.
+    ///
+    /// `loaded_mut` also reaches the tree suspended behind the full-screen
+    /// reader, so a rescan while reading marks that preview stale too and the
+    /// pane is current on the way back out. The reader's own document is
+    /// deliberately left alone (see `ui::reader`).
     pub fn on_rescan(&mut self, outcome: ScanOutcome) {
+        // Hoisted: `loaded_mut` holds `&mut *self`, so `&self.root` alongside it
+        // is E0502. One `PathBuf` clone per filesystem event, next to a re-walk.
+        let root = self.root.clone();
         let Some(loaded) = self.loaded_mut() else {
             // Still loading: treat this as the initial scan.
             self.on_scan(outcome);
             return;
         };
+        loaded.mark_preview_stale_if_changed(&root);
         if loaded.same_skeleton(&outcome.tree) {
             return;
         }
@@ -397,7 +418,7 @@ impl App {
         if loaded.show_preview && loaded.panes.preview.is_some() {
             let sel = loaded.selected_id();
             let key = sel.map(|id| &loaded.tree.nodes[id].rel_path);
-            if key != loaded.preview_for.as_ref() {
+            if loaded.preview_stale || key != loaded.preview_for.as_ref() {
                 return sel;
             }
         }
@@ -433,6 +454,19 @@ impl App {
         let root = self.root.clone();
         if let Screen::Loaded(loaded) = &mut self.screen {
             loaded.ensure_preview(&root);
+        }
+    }
+
+    /// Re-check the previewed file against disk, out of band from the watcher.
+    ///
+    /// The event loop calls this after suspending for `$EDITOR`: editing the
+    /// previewed file is the most common way it changes, and this is the only
+    /// path that works at all where `watch::spawn` returned `None` (the inotify
+    /// limit, say), which otherwise leaves the session with no live refresh.
+    pub fn recheck_preview(&mut self) {
+        let root = self.root.clone();
+        if let Some(loaded) = self.loaded_mut() {
+            loaded.mark_preview_stale_if_changed(&root);
         }
     }
 
@@ -676,6 +710,7 @@ impl Loaded {
             show_preview: true,
             preview_for: None,
             preview: Preview::default(),
+            preview_stale: false,
             focus: Focus::Tree,
             panes: PaneRects::default(),
             filter: String::new(),
@@ -711,9 +746,10 @@ impl Loaded {
     pub fn ensure_preview(&mut self, root: &Path) {
         let id = self.selected_id();
         let key = id.map(|id| self.tree.nodes[id].rel_path.clone());
-        if key == self.preview_for {
+        if !self.preview_stale && key == self.preview_for {
             return;
         }
+        self.preview_stale = false;
         self.preview_for = key;
         // A fresh `Preview` also resets scroll state for the new content.
         self.preview = match id {
@@ -726,6 +762,28 @@ impl Loaded {
                 crate::ui::preview::load(&path)
             }
         };
+    }
+
+    /// Mark the preview stale when the file it was built from has changed on
+    /// disk.
+    ///
+    /// This is the only place a *stationary* selection can notice new content.
+    /// The watcher's signal is a bare "something under the root changed" and
+    /// `ensure_preview` keys on identity, not freshness, so without this an
+    /// in-place edit is invisible to the pane until the selection moves away
+    /// and back — the defect this exists to close.
+    ///
+    /// One `stat` per call, on the event-loop thread. `ui::preview::load`
+    /// already blocks that thread on I/O so this is consistent, but note it now
+    /// happens on *every* filesystem event rather than only on selection
+    /// moves — a hung network mount is felt sooner than it used to be.
+    fn mark_preview_stale_if_changed(&mut self, root: &Path) {
+        let Some(rel) = &self.preview_for else {
+            return;
+        };
+        if Stamp::of(&root.join(rel)) != self.preview.stamp {
+            self.preview_stale = true;
+        }
     }
 
     /// The value of `key` for node `id`, reading the node fields or the relevant
@@ -964,6 +1022,14 @@ impl Loaded {
 
     /// Whether `other` has the same paths and per-node sizes as the current
     /// tree — i.e. nothing the walk can see has changed.
+    ///
+    /// Deliberately *not* an mtime comparison, though the walk already stats
+    /// every file and could supply one. This gate decides whether to rebuild the
+    /// arena and reset all three metric layers, so widening it would make a bare
+    /// `touch` anywhere in the tree re-run the code, churn and status
+    /// collectors. Content freshness for the one file on screen is a much
+    /// cheaper question, answered separately by
+    /// `mark_preview_stale_if_changed`.
     fn same_skeleton(&self, other: &Tree) -> bool {
         if self.tree.nodes.len() != other.nodes.len() || self.tree.index.len() != other.index.len()
         {
@@ -2083,9 +2149,92 @@ mod tests {
         let Screen::Loaded(loaded) = &app.screen else {
             panic!("not loaded");
         };
-        // Nothing changed: the layer stays Ready and no recompute is requested.
+        // Nothing changed: the layer stays Ready and no recompute is requested,
+        // and the preview check that now runs ahead of the gate finds nothing.
         assert!(loaded.code_at(loaded.tree.root).is_some());
+        assert!(!loaded.preview_stale);
         assert!(app.pending_compute.is_none());
+    }
+
+    /// #52: an in-place edit under a stationary selection. The walk reports the
+    /// same paths and the same sizes, so `same_skeleton` short-circuits the
+    /// rescan — the preview's freshness check has to run *ahead* of that gate or
+    /// the pane never refreshes at all.
+    #[test]
+    fn a_rescan_marks_the_preview_stale_when_the_file_changed() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "README.md");
+        app.refresh_preview();
+
+        let Screen::Loaded(loaded) = &mut app.screen else {
+            unreachable!("sample_app is loaded")
+        };
+        assert_eq!(loaded.preview_for.as_deref(), Some(Path::new("README.md")));
+        assert!(!loaded.preview_stale);
+        // `/proj` does not exist, so disk answers `None` for the selection. A
+        // stamp taken from some *other*, real file therefore reads as "changed"
+        // — which is what an edited file looks like, without writing anything.
+        loaded.preview.stamp = Stamp::of(&Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"));
+        assert!(
+            loaded.preview.stamp.is_some(),
+            "the manifest must be stat-able"
+        );
+
+        // An identical skeleton: same paths, same sizes — exactly the walk an
+        // edit that preserves the file's length produces.
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 1000),
+            (PathBuf::from("README.md"), 200),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("still loaded")
+        };
+        assert!(
+            loaded.preview_stale,
+            "the check must run before the skeleton gate"
+        );
+        // Which is what arms the event loop's debounce to do the actual reload.
+        assert!(app.preview_target_id().is_some());
+    }
+
+    /// The converse: the check is a real comparison, not "always invalidate".
+    /// Without this a `cargo build` in the tree would re-read and re-highlight
+    /// the previewed file on every batch of filesystem events.
+    #[test]
+    fn a_rescan_leaves_an_unchanged_preview_alone() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "README.md");
+        app.refresh_preview();
+
+        // Both the cached stamp and disk answer `None` for a path under `/proj`,
+        // so they agree and nothing is invalidated.
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 1000),
+            (PathBuf::from("README.md"), 200),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("still loaded")
+        };
+        assert!(!loaded.preview_stale);
+        assert_eq!(app.preview_target_id(), None);
     }
 
     /// Node ids are renumbered by any added or removed path, so the preview
