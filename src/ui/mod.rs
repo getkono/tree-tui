@@ -434,7 +434,9 @@ mod tests {
                 &super::preview::preview_limits(),
             );
             loaded.preview = super::preview::Preview::from_doc(doc);
-            loaded.preview_for = loaded.selected_id();
+            loaded.preview_for = loaded
+                .selected_id()
+                .map(|id| loaded.tree.nodes[id].rel_path.clone());
             loaded.focus = Focus::Preview;
         }
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

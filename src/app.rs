@@ -120,9 +120,16 @@ pub struct Loaded {
     /// Whether the preview pane is enabled (it still folds away when the
     /// terminal is too narrow or short — see the renderer's thresholds).
     pub show_preview: bool,
-    /// The node whose preview is currently cached, to skip reloading on every
+    /// The path whose preview is currently cached, to skip reloading on every
     /// frame; refreshed when the selection changes.
-    pub preview_for: Option<NodeId>,
+    ///
+    /// Keyed on `rel_path` rather than `NodeId` because ids are not an identity:
+    /// `build_skeleton` numbers the arena from the sorted dir list then the
+    /// sorted file list, so adding or removing any path renumbers everything
+    /// after it. A `NodeId` key silently aliases across a rescan — the cached
+    /// document of one file painted under another file's row — and would have
+    /// to be re-resolved in `reload`. A path survives the swap untouched.
+    pub preview_for: Option<PathBuf>,
     /// Cached preview content (document, scroll state, yank text) for the
     /// selected node.
     pub preview: Preview,
@@ -389,7 +396,8 @@ impl App {
         };
         if loaded.show_preview && loaded.panes.preview.is_some() {
             let sel = loaded.selected_id();
-            if sel != loaded.preview_for {
+            let key = sel.map(|id| &loaded.tree.nodes[id].rel_path);
+            if key != loaded.preview_for.as_ref() {
                 return sel;
             }
         }
@@ -696,14 +704,17 @@ impl Loaded {
     }
 
     /// Load the preview for the current selection if it isn't already cached.
-    /// Called by the renderer only while the preview pane is visible, so the
-    /// bounded file read happens lazily and at most once per selection.
+    ///
+    /// Called from the event loop's debounce arm (via `App::refresh_preview`)
+    /// and on enabling the pane — never from the renderer — so the bounded file
+    /// read and the tree-sitter parse stay off the navigation frames.
     pub fn ensure_preview(&mut self, root: &Path) {
         let id = self.selected_id();
-        if id == self.preview_for {
+        let key = id.map(|id| self.tree.nodes[id].rel_path.clone());
+        if key == self.preview_for {
             return;
         }
-        self.preview_for = id;
+        self.preview_for = key;
         // A fresh `Preview` also resets scroll state for the new content.
         self.preview = match id {
             None => Preview::default(),
@@ -980,6 +991,16 @@ impl Loaded {
         let selected_path = self
             .selected_id()
             .map(|id| self.tree.nodes[id].rel_path.clone());
+
+        // A note-only preview (a directory, a read error) is a `format!` over
+        // the *chained* display name — `src/main/java` — so adding a file under
+        // `src/main` breaks the chain and the note goes wrong. It has no stamp
+        // to compare against disk and costs nothing to rebuild, so a rescan
+        // simply drops it. A real document is left alone; freshness for those is
+        // `mark_preview_stale_if_changed`'s job.
+        if self.preview.doc.is_none() {
+            self.preview_for = None;
+        }
 
         self.tree = tree;
         self.duration = duration;
@@ -2065,5 +2086,93 @@ mod tests {
         // Nothing changed: the layer stays Ready and no recompute is requested.
         assert!(loaded.code_at(loaded.tree.root).is_some());
         assert!(app.pending_compute.is_none());
+    }
+
+    /// Node ids are renumbered by any added or removed path, so the preview
+    /// cache keys on the previewed *path*. A rescan that inserts a file ahead of
+    /// the cached one must leave the cache pointing at the same file — with a
+    /// `NodeId` key it would silently alias onto whatever took that slot.
+    #[test]
+    fn the_preview_cache_key_survives_renumbering() {
+        use crate::ui::fileview::{FileDoc, Limits};
+
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "README.md");
+        let Screen::Loaded(loaded) = &mut app.screen else {
+            unreachable!("sample_app is loaded")
+        };
+        // A real document, so `reload`'s note-only drop does not fire.
+        let src = b"# readme\n";
+        loaded.preview = crate::ui::preview::Preview::from_doc(FileDoc::prepare(
+            Path::new("README.md"),
+            src,
+            src.len() as u64,
+            &Limits::default(),
+        ));
+        loaded.preview_for = Some(PathBuf::from("README.md"));
+        let before = loaded.selected_id().unwrap();
+
+        // `A.md` sorts ahead of `README.md`, so every file id after it shifts.
+        let files = vec![
+            (PathBuf::from("A.md"), 1),
+            (PathBuf::from("README.md"), 200),
+            (PathBuf::from("src/main.rs"), 1000),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("still loaded")
+        };
+        assert_ne!(
+            before,
+            loaded.selected_id().unwrap(),
+            "the fixture must actually renumber the arena"
+        );
+        assert_eq!(loaded.preview_for.as_deref(), Some(Path::new("README.md")));
+        // The cache is still current for the selection, so nothing is re-read.
+        assert_eq!(app.preview_target_id(), None);
+    }
+
+    /// A note-only preview has no stamp to check against disk and is a
+    /// `format!` away from correct, so a rescan simply drops it.
+    #[test]
+    fn a_rescan_drops_a_note_only_preview() {
+        let mut app = sample_app();
+        set_panes(&mut app);
+        select(&mut app, "src");
+        app.refresh_preview();
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("sample_app is loaded")
+        };
+        assert_eq!(loaded.preview_for.as_deref(), Some(Path::new("src")));
+        assert!(loaded.preview.doc.is_none(), "a directory yields a note");
+
+        let files = vec![
+            (PathBuf::from("src/main.rs"), 1000),
+            (PathBuf::from("README.md"), 200),
+            (PathBuf::from("src/new.rs"), 50),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("still loaded")
+        };
+        assert!(
+            loaded.preview_for.is_none(),
+            "the note must be rebuilt: its text is the chained display name"
+        );
     }
 }
