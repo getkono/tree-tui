@@ -26,14 +26,19 @@ pub fn editor_theme() -> &'static karet_theme::Theme {
 static ICONS: OnceLock<IconStyle> = OnceLock::new();
 
 /// Fix the glyph tier for the process. Called once from `main`, before the first
-/// frame; a later call is ignored, and never reaching it leaves the default.
+/// frame; a later call is ignored, and never reaching it leaves
+/// [`crate::cli::DEFAULT_ICONS`].
 pub fn set_icon_style(style: IconStyle) {
     let _ = ICONS.set(style);
 }
 
-/// The active glyph tier (Nerd Font unless `main` chose otherwise).
+/// The active glyph tier, or [`crate::cli::DEFAULT_ICONS`] where `main` never
+/// chose one (a test, or any path that skips the CLI).
+///
+/// Reading the CLI's constant rather than `IconStyle::default()` keeps the two
+/// defaults from drifting: karet's is Nerd Font, ours is not.
 pub fn icon_style() -> IconStyle {
-    *ICONS.get_or_init(IconStyle::default)
+    *ICONS.get_or_init(|| crate::cli::DEFAULT_ICONS)
 }
 
 /// The glyphs for a directory row in `style`: the chevron, plus the folder icon

@@ -16,6 +16,13 @@ use karet_filetype::IconStyle;
 /// Environment variable consulted when `--icons` is absent.
 pub const ICONS_ENV: &str = "TREE_TUI_ICONS";
 
+/// The glyph tier used when neither `--icons` nor [`ICONS_ENV`] picks one.
+///
+/// Unicode rather than karet's own `IconStyle::default()` (Nerd Font): the
+/// richer tier needs a patched font and renders as tofu without one, and the
+/// default is what a first run lands on. `--icons nerd` is one flag away.
+pub const DEFAULT_ICONS: IconStyle = IconStyle::Unicode;
+
 /// The user-facing binary name, used in usage text and the `-V` report.
 pub const BIN_NAME: &str = "tree";
 
@@ -53,7 +60,7 @@ pub enum CliError {
 }
 
 /// Resolve the icon tier: the `--icons` flag wins, then `TREE_TUI_ICONS`, then
-/// the default (Nerd Font).
+/// [`DEFAULT_ICONS`].
 ///
 /// An unrecognized environment value is ignored rather than fatal — a stale
 /// shell export should not stop the tool from starting, whereas a mistyped flag
@@ -61,7 +68,7 @@ pub enum CliError {
 #[must_use]
 pub fn resolve_icons(flag: Option<IconStyle>, env: Option<&str>) -> IconStyle {
     flag.or_else(|| env.and_then(IconStyle::from_name))
-        .unwrap_or_default()
+        .unwrap_or(DEFAULT_ICONS)
 }
 
 /// Parse arguments (everything after `argv[0]`).
@@ -117,7 +124,7 @@ pub fn usage() -> String {
          \n\
          usage:\n  \
            {BIN_NAME} [dir]           explore [dir] (default: .) through swappable lenses\n  \
-           {BIN_NAME} --icons <tier>  glyph tier: nerd (default), unicode, or ascii\n  \
+           {BIN_NAME} --icons <tier>  glyph tier: unicode (default), nerd, or ascii\n  \
            {BIN_NAME} -V, --version   print version and build info\n  \
            {BIN_NAME} -h, --help      print this help\n\
          \n\
@@ -181,9 +188,13 @@ mod tests {
             IconStyle::Ascii
         );
         assert_eq!(resolve_icons(None, Some("unicode")), IconStyle::Unicode);
-        assert_eq!(resolve_icons(None, None), IconStyle::NerdFont);
+        // The default is ours, not karet's `IconStyle::default()` — the rich
+        // tier is tofu without a patched font.
+        assert_eq!(resolve_icons(None, None), IconStyle::Unicode);
+        // ...but the environment still reaches it.
+        assert_eq!(resolve_icons(None, Some("nerd")), IconStyle::NerdFont);
         // A stale export must not stop the tool from starting.
-        assert_eq!(resolve_icons(None, Some("bogus")), IconStyle::NerdFont);
+        assert_eq!(resolve_icons(None, Some("bogus")), IconStyle::Unicode);
     }
 
     #[test]

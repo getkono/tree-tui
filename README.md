@@ -77,16 +77,17 @@ mise run install   # cargo install --path . --force  →  installs the `tree` bi
 
 ```bash
 tree [dir]           # explore [dir] (default: .) through swappable lenses
-tree --icons <tier>  # glyph tier: nerd (default), unicode, or ascii
+tree --icons <tier>  # glyph tier: unicode (default), nerd, or ascii
 tree -V, --version   # print version + build info (commit, build time, profile, rustc, target)
 tree -h, --help      # print usage
 ```
 
 The syntax is strict: at most one directory, no unknown flags. Anything else prints usage and exits 2.
 
-`--icons` defaults to **nerd**, which needs a [Nerd Font](https://www.nerdfonts.com); without one,
-use `--icons unicode` (geometric glyphs, no font support needed) or `--icons ascii`. Set
-`TREE_TUI_ICONS` to make the choice stick.
+`--icons` defaults to **unicode** — geometric glyphs that need no font support, so a first run
+renders on any terminal. `--icons nerd` gives per-file-type icons but needs a
+[Nerd Font](https://www.nerdfonts.com), and shows tofu without one; `--icons ascii` drops to plain
+characters. Set `TREE_TUI_ICONS` to make the choice stick.
 
 ### Keybindings
 
