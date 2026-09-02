@@ -40,3 +40,40 @@ jobs:
       - uses: jdx/mise-action@v4
       - name: Conventional Commits check
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+
+  # vibe-check classifies this pull request's diff and writes a step summary.
+  # See https://github.com/getkono/vibe-check.
+  #
+  # A separate job, deliberately, for three reasons: `check` above is this
+  # repository's required status check and widening it changes what branch
+  # protection means; `check` is shallow on purpose and only this job needs full
+  # history; and a job still earning trust has to be droppable without touching
+  # the gate.
+  #
+  # NOT a required check yet. At vibe-check's current milestone `classify` is
+  # unimplemented and exits 1, so this job is expected to fail — it is here to
+  # prove the distribution chain works from outside its own repository. Make it
+  # required only once exit 0 is the normal outcome.
+  vibe-check:
+    name: vibe-check
+    # Only pull requests have a merge base to classify against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # Never `pull_request_target`: vibe-check refuses that trigger outright,
+    # because it grants a write token and repository secrets to a workflow
+    # evaluating fork-authored code.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # vibe-check computes `git merge-base` itself rather than trusting
+          # `github.event.pull_request.base.sha`, which is the base branch tip
+          # at an earlier moment and drifts as master moves. That needs history,
+          # and the action refuses a shallow clone rather than quietly
+          # unshallowing it.
+          fetch-depth: 0
+          persist-credentials: false
+      # The immutable tag, not the `@v0` alias: before 1.0 the alias carries no
+      # compatibility promise.
+      - uses: getkono/vibe-check@v0.1.0
