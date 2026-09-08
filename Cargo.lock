@@ -2675,9 +2675,9 @@ dependencies = [
 
 [[package]]
 name = "karet-pdf"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "964289f0667275dc93c5ce24761158596fccd5771114f9b132fda51569c41845"
+checksum = "3ba1c76a1259d28450be5faaf003c176ebd8188f63b44fe3e3b057aed5e9d166"
 dependencies = [
  "hayro",
  "thiserror 2.0.20",
