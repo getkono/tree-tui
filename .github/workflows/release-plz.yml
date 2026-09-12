@@ -24,6 +24,10 @@ jobs:
     # was actually cut (not on every push to master).
     outputs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      # JSON array of what was actually released, e.g.
+      # [{"package_name":"tree-tui","version":"0.2.1","tag":"v0.2.1",...}].
+      # The downstream jobs read the tag from here rather than re-deriving it.
+      releases: ${{ steps.release-plz.outputs.releases }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -85,13 +89,26 @@ jobs:
     if: ${{ needs.release-plz-release.outputs.releases_created == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # Let every target run to completion instead of cancelling the healthy legs
+      # the moment one fails, so a release surfaces *all* broken targets at once
+      # and the good artifacts stay downloadable from the run for recovery.
+      #
+      # On its own this is not enough: a matrix job's aggregate result is
+      # `failure` if any leg fails, which would still skip the `needs: build`
+      # jobs. `upload-assets` therefore runs under `!cancelled()` so it attaches
+      # whatever did build; `update-tap` stays strict, since a formula is only
+      # valid with all four tarballs.
+      fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, use_cross: true }
           - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, use_cross: true }
           - { os: macos-latest, target: x86_64-apple-darwin, use_cross: false }
           - { os: macos-latest, target: aarch64-apple-darwin, use_cross: false }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, use_cross: false }
+          # No x86_64-pc-windows-msvc: tree-sitter-scss (pulled in transitively by
+          # karet-treesitter's `all-languages`) passes the GCC-style
+          # `-Wno-unused-parameter` to MSVC's cl.exe, which rejects it (error D8021).
+          # Re-add this target once that is fixed upstream.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -115,18 +132,11 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }}
           fi
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../tree-tui-${{ matrix.target }}.tar.gz tree
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path tree.exe -DestinationPath ../../../tree-tui-${{ matrix.target }}.zip
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -137,13 +147,18 @@ jobs:
   upload-assets:
     name: Upload release binaries
     needs: [release-plz-release, build]
-    if: ${{ needs.release-plz-release.outputs.releases_created == 'true' }}
+    # `!cancelled()` rather than plain success: `build` reports `failure` as a
+    # whole if any single target fails, which would skip this job and leave the
+    # Release with no assets at all -- the v0.2.0 symptom, one trigger removed.
+    # Attach whatever built instead. (`!cancelled()` over `always()` so that
+    # cancelling the run really does stop it.)
+    if: ${{ !cancelled() && needs.release-plz-release.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # upload assets to the existing Release
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      # No checkout: the tag now comes from the release job's output and the
+      # assets from the build artifacts, so this job needs no repo contents.
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -152,13 +167,37 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # With the checkout gone gh has no git remote to infer the repo from,
+          # and it does not read GITHUB_REPOSITORY. Without GH_REPO every upload
+          # fails with "none of the git remotes ... point to a known GitHub host".
+          GH_REPO: ${{ github.repository }}
+          RELEASES: ${{ needs.release-plz-release.outputs.releases }}
         run: |
           set -euo pipefail
-          # The merged release PR bumped Cargo.toml, so its version is the one just
-          # released; release-plz tagged it `v{version}`. Read the first top-level
-          # `version =` (the [package] version) — no toolchain needed on this runner.
-          VERSION="$(grep -m1 '^version *=' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
-          gh release upload "v${VERSION}" tree-tui-*.tar.gz tree-tui-*.zip --clobber
+          # Take the tag from release-plz's own record of what it just released.
+          # Grepping Cargo.toml from a fresh checkout of master would instead report
+          # whatever master holds *now*, which races with any merge that lands in
+          # between. The v{version} fallback is belt-and-braces for an unexpected
+          # output shape; it holds only while release-plz.toml sets no custom
+          # `git_tag_name` (it does not).
+          VERSION="$(jq -r '.[0].version // empty' <<<"$RELEASES")"
+          TAG="$(jq -r '.[0].tag // empty' <<<"$RELEASES")"
+          if [[ -z "$TAG" ]]; then
+            [[ -n "$VERSION" ]] || { echo "::error::no version in release-plz output: $RELEASES"; exit 1; }
+            TAG="v${VERSION}"
+          fi
+          shopt -s nullglob
+          ASSETS=(tree-tui-*.tar.gz)
+          shopt -u nullglob
+          if (( ${#ASSETS[@]} == 0 )); then
+            echo "::error::no build artifacts to upload — every target failed"
+            exit 1
+          fi
+          if (( ${#ASSETS[@]} < 4 )); then
+            echo "::warning::only ${#ASSETS[@]} of 4 targets produced a binary; ${TAG} will be partially populated"
+          fi
+          echo "Uploading ${#ASSETS[@]} asset(s) to ${TAG}: ${ASSETS[*]}"
+          gh release upload "$TAG" "${ASSETS[@]}" --clobber
 
   # Render the Homebrew formula from the release SHA-256s and push it to the tap.
   update-tap:
@@ -181,6 +220,7 @@ jobs:
         shell: bash
         env:
           HAVE_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+          RELEASES: ${{ needs.release-plz-release.outputs.releases }}
         run: |
           set -euo pipefail
           if [[ "$HAVE_TOKEN" != "true" ]]; then
@@ -189,7 +229,10 @@ jobs:
             exit 0
           fi
 
-          VERSION="$(grep -m1 '^version *=' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+          # Same source of truth as the upload job: what release-plz actually
+          # released, not what master's Cargo.toml happens to say right now.
+          VERSION="$(jq -r '.[0].version // empty' <<<"$RELEASES")"
+          [[ -n "$VERSION" ]] || { echo "::error::no version in release-plz output: $RELEASES"; exit 1; }
 
           # SHA-256 of each release tarball, computed from the local build
           # artifacts (correct regardless of CDN propagation). set -e aborts if
