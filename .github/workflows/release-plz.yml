@@ -24,6 +24,10 @@ jobs:
     # was actually cut (not on every push to master).
     outputs:
       releases_created: ${{ steps.release-plz.outputs.releases_created }}
+      # JSON array of what was actually released, e.g.
+      # [{"package_name":"tree-tui","version":"0.2.1","tag":"v0.2.1",...}].
+      # The downstream jobs read the tag from here rather than re-deriving it.
+      releases: ${{ steps.release-plz.outputs.releases }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -153,8 +157,8 @@ jobs:
     permissions:
       contents: write # upload assets to the existing Release
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
+      # No checkout: the tag now comes from the release job's output and the
+      # assets from the build artifacts, so this job needs no repo contents.
       - name: Download build artifacts
         uses: actions/download-artifact@v8
         with:
@@ -163,12 +167,25 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # With the checkout gone gh has no git remote to infer the repo from,
+          # and it does not read GITHUB_REPOSITORY. Without GH_REPO every upload
+          # fails with "none of the git remotes ... point to a known GitHub host".
+          GH_REPO: ${{ github.repository }}
+          RELEASES: ${{ needs.release-plz-release.outputs.releases }}
         run: |
           set -euo pipefail
-          # The merged release PR bumped Cargo.toml, so its version is the one just
-          # released; release-plz tagged it `v{version}`. Read the first top-level
-          # `version =` (the [package] version) — no toolchain needed on this runner.
-          VERSION="$(grep -m1 '^version *=' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+          # Take the tag from release-plz's own record of what it just released.
+          # Grepping Cargo.toml from a fresh checkout of master would instead report
+          # whatever master holds *now*, which races with any merge that lands in
+          # between. The v{version} fallback is belt-and-braces for an unexpected
+          # output shape; it holds only while release-plz.toml sets no custom
+          # `git_tag_name` (it does not).
+          VERSION="$(jq -r '.[0].version // empty' <<<"$RELEASES")"
+          TAG="$(jq -r '.[0].tag // empty' <<<"$RELEASES")"
+          if [[ -z "$TAG" ]]; then
+            [[ -n "$VERSION" ]] || { echo "::error::no version in release-plz output: $RELEASES"; exit 1; }
+            TAG="v${VERSION}"
+          fi
           shopt -s nullglob
           ASSETS=(tree-tui-*.tar.gz)
           shopt -u nullglob
@@ -177,10 +194,10 @@ jobs:
             exit 1
           fi
           if (( ${#ASSETS[@]} < 4 )); then
-            echo "::warning::only ${#ASSETS[@]} of 4 targets produced a binary; v${VERSION} will be partially populated"
+            echo "::warning::only ${#ASSETS[@]} of 4 targets produced a binary; ${TAG} will be partially populated"
           fi
-          echo "Uploading ${#ASSETS[@]} asset(s) to v${VERSION}: ${ASSETS[*]}"
-          gh release upload "v${VERSION}" "${ASSETS[@]}" --clobber
+          echo "Uploading ${#ASSETS[@]} asset(s) to ${TAG}: ${ASSETS[*]}"
+          gh release upload "$TAG" "${ASSETS[@]}" --clobber
 
   # Render the Homebrew formula from the release SHA-256s and push it to the tap.
   update-tap:
@@ -203,6 +220,7 @@ jobs:
         shell: bash
         env:
           HAVE_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+          RELEASES: ${{ needs.release-plz-release.outputs.releases }}
         run: |
           set -euo pipefail
           if [[ "$HAVE_TOKEN" != "true" ]]; then
@@ -211,7 +229,10 @@ jobs:
             exit 0
           fi
 
-          VERSION="$(grep -m1 '^version *=' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
+          # Same source of truth as the upload job: what release-plz actually
+          # released, not what master's Cargo.toml happens to say right now.
+          VERSION="$(jq -r '.[0].version // empty' <<<"$RELEASES")"
+          [[ -n "$VERSION" ]] || { echo "::error::no version in release-plz output: $RELEASES"; exit 1; }
 
           # SHA-256 of each release tarball, computed from the local build
           # artifacts (correct regardless of CDN propagation). set -e aborts if
