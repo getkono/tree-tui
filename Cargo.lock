@@ -2631,9 +2631,9 @@ dependencies = [
 
 [[package]]
 name = "karet-core"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b9d3e150e300e0fd64ff6b29a6be4390c6c318cdf3856f111b4b551758521a8"
+checksum = "b85620cddd1ca519953e5e5d155fba88d7ee2d81097ff48bc57d6ac37747dea1"
 dependencies = [
  "thiserror 2.0.20",
 ]
