@@ -56,6 +56,13 @@ is instant, and you never pay for git history unless you ask for it.
 
 ## Install
 
+With [mise](https://mise.jdx.dev) (macOS and Linux) — grabs the prebuilt binary from the
+GitHub release:
+
+```bash
+mise use -g github:getkono/tree-tui   # installs the `tree` binary
+```
+
 Homebrew (macOS and Linux):
 
 ```bash
@@ -179,7 +186,8 @@ warnings), and the test suite. Run `hk install` once after cloning to activate t
 
 ## CI/CD
 
-GitHub Actions runs format checks, Clippy, and tests on pushes to `master` and pull requests.
+GitHub Actions runs format checks, Clippy, tests, and a build check for each released target
+on pushes to `master` and pull requests.
 
 ## License
 
