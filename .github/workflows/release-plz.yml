@@ -85,13 +85,26 @@ jobs:
     if: ${{ needs.release-plz-release.outputs.releases_created == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
+      # Let every target run to completion instead of cancelling the healthy legs
+      # the moment one fails, so a release surfaces *all* broken targets at once
+      # and the good artifacts stay downloadable from the run for recovery.
+      #
+      # On its own this is not enough: a matrix job's aggregate result is
+      # `failure` if any leg fails, which would still skip the `needs: build`
+      # jobs. `upload-assets` therefore runs under `!cancelled()` so it attaches
+      # whatever did build; `update-tap` stays strict, since a formula is only
+      # valid with all four tarballs.
+      fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, use_cross: true }
           - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, use_cross: true }
           - { os: macos-latest, target: x86_64-apple-darwin, use_cross: false }
           - { os: macos-latest, target: aarch64-apple-darwin, use_cross: false }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, use_cross: false }
+          # No x86_64-pc-windows-msvc: tree-sitter-scss (pulled in transitively by
+          # karet-treesitter's `all-languages`) passes the GCC-style
+          # `-Wno-unused-parameter` to MSVC's cl.exe, which rejects it (error D8021).
+          # Re-add this target once that is fixed upstream.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -115,18 +128,11 @@ jobs:
           else
             cargo build --release --target ${{ matrix.target }}
           fi
-      - name: Package (Unix)
-        if: runner.os != 'Windows'
+      - name: Package
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../tree-tui-${{ matrix.target }}.tar.gz tree
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          cd target/${{ matrix.target }}/release
-          Compress-Archive -Path tree.exe -DestinationPath ../../../tree-tui-${{ matrix.target }}.zip
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
@@ -137,7 +143,12 @@ jobs:
   upload-assets:
     name: Upload release binaries
     needs: [release-plz-release, build]
-    if: ${{ needs.release-plz-release.outputs.releases_created == 'true' }}
+    # `!cancelled()` rather than plain success: `build` reports `failure` as a
+    # whole if any single target fails, which would skip this job and leave the
+    # Release with no assets at all -- the v0.2.0 symptom, one trigger removed.
+    # Attach whatever built instead. (`!cancelled()` over `always()` so that
+    # cancelling the run really does stop it.)
+    if: ${{ !cancelled() && needs.release-plz-release.outputs.releases_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # upload assets to the existing Release
@@ -158,7 +169,18 @@ jobs:
           # released; release-plz tagged it `v{version}`. Read the first top-level
           # `version =` (the [package] version) — no toolchain needed on this runner.
           VERSION="$(grep -m1 '^version *=' Cargo.toml | sed -E 's/^version *= *"([^"]+)".*/\1/')"
-          gh release upload "v${VERSION}" tree-tui-*.tar.gz tree-tui-*.zip --clobber
+          shopt -s nullglob
+          ASSETS=(tree-tui-*.tar.gz)
+          shopt -u nullglob
+          if (( ${#ASSETS[@]} == 0 )); then
+            echo "::error::no build artifacts to upload — every target failed"
+            exit 1
+          fi
+          if (( ${#ASSETS[@]} < 4 )); then
+            echo "::warning::only ${#ASSETS[@]} of 4 targets produced a binary; v${VERSION} will be partially populated"
+          fi
+          echo "Uploading ${#ASSETS[@]} asset(s) to v${VERSION}: ${ASSETS[*]}"
+          gh release upload "v${VERSION}" "${ASSETS[@]}" --clobber
 
   # Render the Homebrew formula from the release SHA-256s and push it to the tap.
   update-tap:
