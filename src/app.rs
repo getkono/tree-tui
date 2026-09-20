@@ -554,7 +554,7 @@ impl App {
     /// moving focus or the selection.
     pub fn handle_click(&mut self, col: u16, row: u16) {
         let mut activate = false;
-        if let Some(loaded) = self.loaded_mut() {
+        if let Screen::Loaded(loaded) = &mut self.screen {
             // A button-up that landed outside the terminal never reached us, so
             // any drag still marked in flight is stale by the time a new press
             // arrives. Clearing here is what keeps one from wedging on.
@@ -594,7 +594,11 @@ impl App {
     /// pointer directly; both panes clamp at [`ui::PANE_MIN`](crate::ui::PANE_MIN),
     /// so dragging to an edge parks the divider rather than dismissing a pane.
     pub fn handle_drag(&mut self, col: u16) -> bool {
-        let Some(loaded) = self.loaded_mut() else {
+        // The tree screen only. The reader takes the whole terminal but keeps
+        // the suspended tree — pane rects and all — so reaching through to it
+        // would let a drag move a divider that is not on screen, against rects
+        // no frame can correct while the reader owns the draw.
+        let Screen::Loaded(loaded) = &mut self.screen else {
             return false;
         };
         let Some(offset) = loaded.split_drag else {
@@ -620,6 +624,10 @@ impl App {
     }
 
     /// End a divider drag, reporting whether one was in flight.
+    ///
+    /// Reaches the suspended tree as well, so a button-up that arrives after
+    /// the reader has opened still clears the grab it would otherwise leave
+    /// behind.
     pub fn end_drag(&mut self) -> bool {
         self.loaded_mut()
             .is_some_and(|loaded| loaded.split_drag.take().is_some())
@@ -2225,6 +2233,62 @@ mod tests {
         assert!(!app.handle_drag(30), "dragged against a folded pane");
         assert_eq!(split_share(&app), before, "the split moved invisibly");
         assert!(!app.end_drag(), "the drag should already be over");
+    }
+
+    /// The reader takes the whole terminal but keeps the suspended tree, pane
+    /// rects included. A drag must not act on those: no frame can correct them
+    /// while the reader owns the draw, so the split would move unseen and only
+    /// surface on the way back.
+    #[test]
+    fn a_drag_cannot_move_the_split_behind_the_reader() {
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "README.md");
+        let edge = laid_out_edge(&app);
+        let before = split_share(&app);
+
+        app.update(Action::Open);
+        assert!(matches!(app.screen, Screen::Reader(_)), "reader is open");
+
+        // Nothing to grab while reading, so motion has nothing to act on.
+        app.handle_click(edge, 5);
+        assert!(
+            !app.handle_drag(30),
+            "grabbed the divider behind the reader"
+        );
+        let Screen::Reader(reader) = &app.screen else {
+            panic!("not reading")
+        };
+        assert_eq!(reader.loaded.split_share, before, "the split moved unseen");
+        assert_eq!(reader.loaded.split_drag, None, "a grab was taken");
+
+        // And the other order: grabbed on the tree, then the reader opens
+        // under the held button. The grab travels with the suspended tree, so
+        // only the motion itself can refuse to act on it.
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        set_viewport(&mut app, 17);
+        select(&mut app, "README.md");
+        app.handle_click(laid_out_edge(&app), 5);
+        assert!(app.handle_drag(90), "the drag works on the tree");
+        let held = split_share(&app);
+
+        app.update(Action::Open);
+        assert!(matches!(app.screen, Screen::Reader(_)), "reader is open");
+        assert!(!app.handle_drag(30), "dragged behind the reader");
+        let Screen::Reader(reader) = &app.screen else {
+            panic!("not reading")
+        };
+        assert_eq!(reader.loaded.split_share, held, "the split moved unseen");
+
+        // A release still reaches the suspended tree, so no grab is left over
+        // to fire when the reader closes.
+        assert!(app.end_drag(), "the held grab is still there to clear");
+        let Screen::Reader(reader) = &app.screen else {
+            panic!("not reading")
+        };
+        assert_eq!(reader.loaded.split_drag, None);
     }
 
     #[test]

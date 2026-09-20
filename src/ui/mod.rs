@@ -685,18 +685,53 @@ mod tests {
             loaded.table_state.select(Some(idx));
         }
         app.update(Action::ToggleExclude);
+        // Expanded, so the excluded directory's *children* render too: they are
+        // excluded only by inheritance and must be treated the same way.
+        app.update(Action::ExpandAll);
 
         let mut terminal = Terminal::new(TestBackend::new(180, 16)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let view = format!("{}", terminal.backend());
-        // src holds 180 of 200 lines; excluded, the root total drops to 20 and
-        // a naive ratio would print 900.0%.
+        // src holds 180 of 200 lines; excluded, the root total drops to 20, so
+        // a naive ratio prints 900.0% for src and 600.0% for the main.rs under
+        // it — the case an explicit-boundary check would miss.
         assert!(!view.contains("900.0%"), "incoherent share:\n{view}");
-        assert!(view.contains('—'), "no placeholder for the share:\n{view}");
+        assert!(
+            !view.contains("600.0%"),
+            "inherited exclusion missed:\n{view}"
+        );
+        for row in ["src/", "main.rs"] {
+            let line = view
+                .lines()
+                .find(|l| l.contains(row))
+                .unwrap_or_else(|| panic!("no {row} row:\n{view}"));
+            assert!(line.contains('—'), "{row} still reports a share:\n{line}");
+        }
         // The rows still counted keep a real share of the reduced total.
         assert!(
             view.contains("100.0%"),
             "README.md is now all of it:\n{view}"
         );
+    }
+
+    /// The seam can fold away mid-drag, and the frame that folds it is the one
+    /// that knows: it ends the drag rather than leaving it to the next event.
+    #[test]
+    fn folding_the_preview_away_ends_a_drag_held_on_its_divider() {
+        let mut app = sample_app();
+        let mut wide = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        wide.draw(|frame| render(frame, &mut app)).unwrap();
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.split_drag = Some(0);
+        }
+
+        // Too narrow for the preview: the pane folds, and the drag with it.
+        let mut narrow = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        narrow.draw(|frame| render(frame, &mut app)).unwrap();
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded")
+        };
+        assert!(loaded.panes.preview.is_none(), "the preview should fold");
+        assert_eq!(loaded.split_drag, None, "the drag outlived its divider");
     }
 }

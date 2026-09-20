@@ -232,6 +232,12 @@ impl Lens {
 
     /// Optional numeric columns (besides name, the language legend, and the
     /// always-present primary column).
+    ///
+    /// Every list must run its [`Rank::Core`] columns before its
+    /// [`Rank::Extra`] ones. `ui::tree_view` drops from the right and counts
+    /// the cores to decide how much width yielding the extras could free;
+    /// interleaving them would stop that count at the last core and spend
+    /// columns on a legend it then could not show.
     pub fn columns(self) -> &'static [ColumnSpec] {
         match self {
             Lens::Code => CODE_COLS,
