@@ -16,9 +16,17 @@ use crate::model::CodeData;
 /// reported a parsing ambiguity.
 pub fn collect_code(root: &Path) -> (HashMap<PathBuf, CodeData>, bool) {
     let mut languages = Languages::new();
-    // tokei honors .gitignore/.ignore and walks in parallel.
-    let ignored: &[&str] = &[];
-    languages.get_statistics(&[root], ignored, &Config::default());
+    // Match the walk's file set: tokei honors .gitignore/.ignore and walks in
+    // parallel, but its `hidden` defaults to "skip", which would report every
+    // dot-entry the walk now shows as zero lines. Turning that off makes tokei
+    // descend `.git` too, so it is excluded explicitly (these become negated
+    // override globs inside tokei) — the same prune the walk does.
+    let ignored: &[&str] = &[".git", ".jj"];
+    let config = Config {
+        hidden: Some(true),
+        ..Config::default()
+    };
+    languages.get_statistics(&[root], ignored, &config);
     let inaccurate = languages.values().any(|language| language.inaccurate);
 
     let mut files: HashMap<PathBuf, CodeData> = HashMap::new();
@@ -49,4 +57,31 @@ pub fn collect_code(root: &Path) -> (HashMap<PathBuf, CodeData>, bool) {
     }
 
     (files, inaccurate)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    /// The code lens must see the same files the walk does. tokei skips hidden
+    /// files by default, and turning that off makes it descend `.git` — this
+    /// pins both halves against this crate's own checkout. Inert in the
+    /// published tarball, which excludes `/.github`.
+    #[test]
+    fn dot_entries_are_counted_and_the_git_dir_is_not() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        if !root.join(".github/workflows/ci.yml").exists() {
+            return;
+        }
+        let (files, _) = super::collect_code(root);
+
+        let ci = files
+            .get(Path::new(".github/workflows/ci.yml"))
+            .expect("a tracked file under a dot-directory is counted");
+        assert!(ci.num.code > 0, "and it has real line counts");
+        assert!(
+            !files.keys().any(|p| p.starts_with(".git/")),
+            "tokei must not walk the git object store"
+        );
+    }
 }
