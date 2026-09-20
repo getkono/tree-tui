@@ -26,6 +26,7 @@ const BINDINGS: &[(&str, &str)] = &[
     ("x", "exclude / include the selected node"),
     ("p / Tab", "toggle the preview pane"),
     ("w", "focus the tree / preview (scroll with j/k, h/l)"),
+    ("drag", "resize the tree / preview split"),
     ("y", "copy preview text · selected path"),
     ("S", "release the mouse for native selection"),
     ("/", "filter by name (Esc clears)"),

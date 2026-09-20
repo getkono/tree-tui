@@ -53,7 +53,8 @@ is instant, and you never pay for git history unless you ask for it.
   render (`--icons nerd|unicode|ascii`).
 - **Preview & read anything** — highlighted code, inline images, PDF pages, or a hex dump, in a side
   pane or a full-screen reader with search, folds, and soft wrap.
-- **Responsive** — columns drop gracefully as the terminal narrows; works on any Unicode terminal.
+- **Responsive** — drag the divider to resize the panes; columns drop gracefully as the terminal
+  narrows, with the code lens keeping its language breakdown longest. Works on any Unicode terminal.
 
 ## Install
 
@@ -115,6 +116,7 @@ characters. Set `TREE_TUI_ICONS` to make the choice stick.
 | `r` | reverse the sort order |
 | `z` | hide rows that are zero under the active lens |
 | `p` / `Tab` | toggle the preview pane |
+| drag | drag the divider between the tree and the preview to resize them |
 | `/` | filter by name (`Esc` clears) |
 | `?` | toggle help |
 | `q` / `Ctrl-c` | quit |

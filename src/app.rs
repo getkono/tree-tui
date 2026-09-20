@@ -44,12 +44,19 @@ pub enum Focus {
 }
 
 /// The pane rectangles from the last render, for mouse hit-testing. Only the
-/// focusable panes are tracked; a point over the detail pane or chrome hits
-/// neither and leaves focus unchanged.
+/// focusable panes answer [`PaneRects::hit`]; a point over chrome hits neither
+/// and leaves focus unchanged.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct PaneRects {
+    /// The whole body region, which the divider drag reads to turn a screen
+    /// column back into a split percentage.
+    pub body: Rect,
     pub tree: Rect,
     pub preview: Option<Rect>,
+    /// The seam between the tree and the preview — the divider's grab target.
+    /// `None` whenever the preview is not on screen, which is also what makes
+    /// the drag impossible to start then.
+    pub divider: Option<Rect>,
 }
 
 impl PaneRects {
@@ -62,6 +69,12 @@ impl PaneRects {
         } else {
             None
         }
+    }
+
+    /// Whether the point is on the divider. Checked before [`hit`](Self::hit),
+    /// since the seam's two columns lie inside the panes' own rects.
+    pub fn on_divider(&self, col: u16, row: u16) -> bool {
+        self.divider.is_some_and(|r| contains(r, col, row))
     }
 }
 
@@ -118,6 +131,18 @@ pub struct Loaded {
     /// Whether the preview pane is enabled (it still folds away when the
     /// terminal is too narrow or short — see the renderer's thresholds).
     pub show_preview: bool,
+    /// The preview pane's share of the body width, in thousandths (see
+    /// [`ui::SPLIT_SCALE`](crate::ui::SPLIT_SCALE)). Moved by dragging the
+    /// divider; kept as a *share* rather than a column count so a terminal
+    /// resize preserves the proportion the user chose.
+    pub split_share: u16,
+    /// A divider drag in flight, holding the offset from the grabbed column to
+    /// the preview's left edge.
+    ///
+    /// The seam is two columns wide, so without the offset a grab on its left
+    /// half would ask for a pane one column wider than the one already there
+    /// and the divider would jump before the mouse moved.
+    pub split_drag: Option<u16>,
     /// The path whose preview is currently cached, to skip reloading on every
     /// frame; refreshed when the selection changes.
     ///
@@ -524,8 +549,23 @@ impl App {
     /// tree it also moves the selection to the clicked row; clicking the
     /// already-selected row activates it (like Enter: expand/descend a dir, open
     /// a file). A click on the border, header, or blank rows only focuses.
+    ///
+    /// A click on the divider grabs it instead, starting a resize drag without
+    /// moving focus or the selection.
     pub fn handle_click(&mut self, col: u16, row: u16) {
         let mut activate = false;
+        if let Some(loaded) = self.loaded_mut() {
+            // A button-up that landed outside the terminal never reached us, so
+            // any drag still marked in flight is stale by the time a new press
+            // arrives. Clearing here is what keeps one from wedging on.
+            loaded.split_drag = None;
+            if let Some(preview) = loaded.panes.preview
+                && loaded.panes.on_divider(col, row)
+            {
+                loaded.split_drag = Some(preview.x.saturating_sub(col));
+                return;
+            }
+        }
         if let Screen::Loaded(loaded) = &mut self.screen
             && let Some(focus) = loaded.panes.hit(col, row)
         {
@@ -544,6 +584,45 @@ impl App {
         if activate {
             self.open_selected();
         }
+    }
+
+    /// Move the divider to `col` while a drag is in flight, reporting whether
+    /// the split actually changed (a drag that stays within the same cell asks
+    /// for no repaint).
+    ///
+    /// The cursor names the *preview's* left edge, so the split follows the
+    /// pointer directly; both panes clamp at [`ui::PANE_MIN`](crate::ui::PANE_MIN),
+    /// so dragging to an edge parks the divider rather than dismissing a pane.
+    pub fn handle_drag(&mut self, col: u16) -> bool {
+        let Some(loaded) = self.loaded_mut() else {
+            return false;
+        };
+        let Some(offset) = loaded.split_drag else {
+            return false;
+        };
+        // The seam can vanish under a held button — a resize past the fold
+        // threshold, or `Tab` — and a drag against one nobody can see would
+        // only surface when the pane came back.
+        let body = loaded.panes.body;
+        if loaded.panes.divider.is_none() || body.width == 0 {
+            loaded.split_drag = None;
+            return false;
+        }
+        // `offset` anchors the drag to the edge as it was grabbed, so the seam
+        // tracks the pointer instead of snapping to it.
+        let edge = col.saturating_add(offset);
+        let wanted = body.right().saturating_sub(edge);
+        let width = crate::ui::clamp_preview_width(body.width, wanted);
+        let share = crate::ui::width_to_share(body.width, width);
+        let changed = share != loaded.split_share;
+        loaded.split_share = share;
+        changed
+    }
+
+    /// End a divider drag, reporting whether one was in flight.
+    pub fn end_drag(&mut self) -> bool {
+        self.loaded_mut()
+            .is_some_and(|loaded| loaded.split_drag.take().is_some())
     }
 
     fn clear_filter(&mut self) {
@@ -697,6 +776,8 @@ impl Loaded {
             viewport_rows: 1,
             duration,
             show_preview: true,
+            split_share: crate::ui::DEFAULT_SPLIT_SHARE,
+            split_drag: None,
             preview_for: None,
             preview: Preview::default(),
             preview_stale: false,
@@ -1527,14 +1608,79 @@ mod tests {
         loaded.active_lens
     }
 
-    /// Give the loaded screen a tree pane on the left and a preview on the right.
+    /// Give the loaded screen a tree pane on the left and a preview on the
+    /// right, with the divider on the preview's left edge. The panes are set a
+    /// gap apart (unlike the real layout, where they abut) so the hit tests can
+    /// also exercise a point belonging to neither.
     fn set_panes(app: &mut App) {
         if let Screen::Loaded(loaded) = &mut app.screen {
-            loaded.panes = PaneRects {
-                tree: Rect::new(0, 0, 40, 20),
-                preview: Some(Rect::new(80, 0, 40, 20)),
-            };
+            loaded.panes = test_panes();
         }
+    }
+
+    fn test_panes() -> PaneRects {
+        PaneRects {
+            body: Rect::new(0, 0, 120, 20),
+            tree: Rect::new(0, 0, 40, 20),
+            preview: Some(Rect::new(80, 0, 40, 20)),
+            divider: Some(Rect::new(79, 0, 2, 20)),
+        }
+    }
+
+    /// Pane rects as the renderer would actually lay them out for the default
+    /// split: abutting, with the seam straddling their shared edge. The drag
+    /// tests need this rather than [`test_panes`], whose deliberate gap would
+    /// otherwise disagree with the width `split_share` renders.
+    const LAID_OUT_BODY: u16 = 120;
+
+    fn set_laid_out_panes(app: &mut App) {
+        let Screen::Loaded(loaded) = &mut app.screen else {
+            panic!("not loaded")
+        };
+        let body = Rect::new(0, 0, LAID_OUT_BODY, 20);
+        let width = crate::ui::preview_width(body.width, loaded.split_share);
+        let edge = body.right() - width;
+        loaded.panes = PaneRects {
+            body,
+            tree: Rect::new(0, 0, edge, 20),
+            preview: Some(Rect::new(edge, 0, width, 20)),
+            divider: Some(Rect::new(edge - 1, 0, 2, 20)),
+        };
+    }
+
+    /// The column of the preview's left edge in [`set_laid_out_panes`] — the
+    /// seam's right half, and what a drag anchors to.
+    fn laid_out_edge(app: &App) -> u16 {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded")
+        };
+        loaded.panes.preview.expect("preview recorded").x
+    }
+
+    fn split_share(app: &App) -> u16 {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded")
+        };
+        loaded.split_share
+    }
+
+    /// The preview width the recorded body would render at the current share.
+    fn preview_cols(app: &App) -> u16 {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded")
+        };
+        crate::ui::preview_width(loaded.panes.body.width, loaded.split_share)
+    }
+
+    fn show_preview(app: &App) -> bool {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded")
+        };
+        loaded.show_preview
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
     }
 
     /// Set the visible-rows count the renderer normally records each frame, so
@@ -1747,10 +1893,7 @@ mod tests {
 
     #[test]
     fn pane_hit_test_maps_point_to_focus() {
-        let panes = PaneRects {
-            tree: Rect::new(0, 0, 40, 20),
-            preview: Some(Rect::new(80, 0, 40, 20)),
-        };
+        let panes = test_panes();
         assert_eq!(panes.hit(5, 5), Some(Focus::Tree));
         assert_eq!(panes.hit(90, 5), Some(Focus::Preview));
         assert_eq!(panes.hit(60, 5), None); // the gap between the panes
@@ -1955,15 +2098,150 @@ mod tests {
         assert_eq!(selected_index(&app), before + 1);
     }
 
-    fn key(code: KeyCode) -> KeyEvent {
-        KeyEvent::new(code, KeyModifiers::NONE)
-    }
+    /// Grabbing the divider is a resize, not a click: it must not move focus or
+    /// the selection out from under the drag. Both columns of the seam lie
+    /// inside a pane's own rect, so each would otherwise focus that pane.
+    #[test]
+    fn grabbing_the_divider_starts_a_drag_without_moving_focus() {
+        // The seam's right column belongs to the preview's rect.
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        select(&mut app, "README.md");
+        let before = selected_index(&app);
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.focus = Focus::Preview;
+        }
+        let edge = laid_out_edge(&app);
 
-    fn show_preview(app: &App) -> bool {
+        app.handle_click(edge, 5);
         let Screen::Loaded(loaded) = &app.screen else {
             panic!("not loaded")
         };
-        loaded.show_preview
+        assert_eq!(loaded.split_drag, Some(0), "grabbed at the preview's edge");
+        assert_eq!(loaded.focus, Focus::Preview, "focus must not move");
+        assert_eq!(selected_index(&app), before);
+
+        // The left column belongs to the tree's, and is one short of the edge.
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        app.handle_click(edge - 1, 5);
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded")
+        };
+        assert_eq!(loaded.split_drag, Some(1));
+        assert_eq!(loaded.focus, Focus::Tree);
+    }
+
+    /// Whichever column of the two-wide seam is grabbed, the divider must stay
+    /// put until the pointer actually moves.
+    #[test]
+    fn grabbing_either_column_of_the_seam_does_not_move_the_divider() {
+        for offset in [0, 1] {
+            let mut app = sample_app();
+            set_laid_out_panes(&mut app);
+            let before = preview_cols(&app);
+            let grab = laid_out_edge(&app) - offset;
+            app.handle_click(grab, 5);
+            app.handle_drag(grab);
+            assert_eq!(
+                preview_cols(&app),
+                before,
+                "grabbing the seam at offset {offset} jumped the divider"
+            );
+        }
+    }
+
+    #[test]
+    fn dragging_the_divider_follows_the_cursor_and_clamps_both_panes() {
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        app.handle_click(laid_out_edge(&app), 5);
+
+        // The cursor carries the preview's left edge: at column 90 the preview
+        // is the 30 columns to its right.
+        assert!(app.handle_drag(90));
+        assert_eq!(preview_cols(&app), 30);
+
+        // Dragging past either end parks at PANE_MIN rather than dismissing a
+        // pane, from both directions.
+        assert!(app.handle_drag(0));
+        assert_eq!(preview_cols(&app), LAID_OUT_BODY - crate::ui::PANE_MIN);
+        assert!(app.handle_drag(LAID_OUT_BODY - 1));
+        assert_eq!(preview_cols(&app), crate::ui::PANE_MIN);
+
+        // Staying inside the same cell asks for no repaint.
+        assert!(!app.handle_drag(LAID_OUT_BODY - 1));
+    }
+
+    /// The share is stored in thousandths, and rounded on the way in, so that
+    /// every column of a wide body is reachable — at one part in 100 the seam
+    /// would quantize into 4-column steps on a 400-column terminal.
+    #[test]
+    fn every_column_of_a_wide_body_is_reachable_by_the_drag() {
+        let mut app = sample_app();
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.panes = PaneRects {
+                body: Rect::new(0, 0, 400, 20),
+                tree: Rect::new(0, 0, 240, 20),
+                preview: Some(Rect::new(240, 0, 160, 20)),
+                divider: Some(Rect::new(239, 0, 2, 20)),
+            };
+        }
+        app.handle_click(240, 5);
+        for col in 100..350 {
+            app.handle_drag(col);
+            assert_eq!(preview_cols(&app), 400 - col, "column {col} unreachable");
+        }
+    }
+
+    #[test]
+    fn a_drag_does_nothing_until_the_divider_is_grabbed() {
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        let before = split_share(&app);
+
+        // Motion with no grab, and a click that landed in a pane rather than on
+        // the seam, both leave the split alone.
+        assert!(!app.handle_drag(60));
+        app.handle_click(5, 5);
+        assert!(!app.handle_drag(60));
+        assert_eq!(split_share(&app), before);
+    }
+
+    /// The seam can vanish under a held button — `Tab`, or a resize past the
+    /// fold threshold. Motion after that must not keep moving a split whose
+    /// divider is no longer on screen.
+    #[test]
+    fn a_drag_ends_when_the_preview_folds_away_beneath_it() {
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        app.handle_click(laid_out_edge(&app), 5);
+        let before = split_share(&app);
+
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.panes.preview = None;
+            loaded.panes.divider = None;
+        }
+        assert!(!app.handle_drag(30), "dragged against a folded pane");
+        assert_eq!(split_share(&app), before, "the split moved invisibly");
+        assert!(!app.end_drag(), "the drag should already be over");
+    }
+
+    #[test]
+    fn releasing_ends_the_drag_and_a_later_press_cannot_inherit_it() {
+        let mut app = sample_app();
+        set_laid_out_panes(&mut app);
+        let edge = laid_out_edge(&app);
+        app.handle_click(edge, 5);
+        assert!(app.end_drag(), "a drag was in flight");
+        assert!(!app.end_drag(), "and only reported once");
+        assert!(!app.handle_drag(60), "the release stopped the drag");
+
+        // A button-up lost outside the terminal never arrives; the next press
+        // must still not resume the old drag.
+        app.handle_click(edge, 5);
+        app.handle_click(5, 5);
+        assert!(!app.handle_drag(60), "stale drag wedged on");
     }
 
     #[test]

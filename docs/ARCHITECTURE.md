@@ -36,7 +36,10 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
 - `app` — state, the reducer, the lazy-compute request/cache wiring, and `Loaded::value` (the one
   place that maps a `SubKey` to the node field or layer it reads).
 - `event` — the `tokio::select!` loop: input, walk completion, lens results, spinner ticks.
-- `ui` — the render scaffold (header / tree table / preview / footer / help) driven by the active lens.
+- `ui` — the render scaffold (header / tree table / preview / footer / help) driven by the active
+  lens. The tree/preview split is state (`Loaded::split_share`, in thousandths of the body width),
+  not a constant: the seam between the panes is a two-column drag handle, which is why `tui` enables
+  xterm mouse mode 1002 (motion while a button is held) but still not 1003 (all motion).
 
 File viewing is not part of the metric core. The inline **preview** pane (`ui::preview`) and the
 full-screen **reader** (`ui::reader`) both render through **`ui::fileview`**, which composes the
