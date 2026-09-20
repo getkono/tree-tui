@@ -17,8 +17,10 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
 ```
 
 - The **walk** (`collect::walk`, via the `ignore` crate) runs once at startup and is cheap
-  (structure + file sizes, no contents). It yields *every* non-ignored file, so non-code files
-  appear too.
+  (structure + file sizes, no contents). Its rule is "what git would show you": every tracked file
+  (unioned in from the git index, so a tracked-but-gitignored one still gets a node) plus every
+  untracked file git wouldn't ignore. Hidden-filtering is off — a dot-entry is an ordinary file —
+  so `.git`/`.jj` are pruned explicitly. Non-code files appear too.
 - A **lens** is opened on demand. If its data isn't cached, the event loop spawns the lens's
   **collector** on a blocking thread; the result comes back over an `mpsc` channel, is **aggregated**
   bottom-up into a per-node `Layer`, and cached for the session.

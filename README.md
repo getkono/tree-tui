@@ -9,8 +9,9 @@ can see *where* things actually concentrate.
 tree [dir]   # dir defaults to the current directory
 ```
 
-Press `m` to cycle lenses (or `1`–`4` to jump). Every file shows up — source, binaries, images,
-lockfiles — not just code, so the size and git lenses are meaningful too.
+Press `m` to cycle lenses (or `1`–`4` to jump). Every file git would show you shows up — source,
+binaries, images, lockfiles, dotfiles like `.github/` — not just code, so the size and git lenses are
+meaningful too.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/getkono/tree-tui/master/assets/tree.svg"
@@ -40,8 +41,9 @@ is instant, and you never pay for git history unless you ask for it.
 ## Features
 
 - **One tree, many lenses** — the same directory tree, re-measured on demand; switch with a keypress.
-- **Everything appears** — an `ignore`-based walk (honoring `.gitignore`) lists all files, not only
-  code, so size and git data have something to attach to.
+- **Everything appears** — every file git tracks, plus every untracked file it wouldn't ignore.
+  Dot-entries (`.github/`, `.gitignore`) are ordinary files; `.git/` itself and anything gitignored
+  stay out. Not only code, so size and git data have something to attach to.
 - **Aggregated bottom-up** — every directory totals its subtree under the active lens.
 - **Navigate & drill in** — expand/collapse, jump to parent/child, page, go to top/bottom.
 - **Sort** — by the active lens's columns (or by name / file count); reverse on demand.
@@ -136,8 +138,9 @@ The TUI owns the terminal, so logs go to a file and only when asked. Set `TREE_L
 
 `tree` separates a **shared, metric-agnostic core** from **modular per-lens tools**:
 
-1. **Walk** — an `ignore`-based filesystem walk (the same crate tokei uses) builds the arena-backed
-   tree skeleton and records each file's size. This runs once, eagerly.
+1. **Walk** — an `ignore`-based filesystem walk (the same crate tokei uses), unioned with the git
+   index so a tracked-but-gitignored file still appears, builds the arena-backed tree skeleton and
+   records each file's size. This runs once, eagerly.
 2. **Lenses** — a `Lens` is an exhaustive enum that decides *what* is shown and *how* (columns, the
    primary value, sortable sub-keys). Sorting reads a precomputed per-node value slice, so one
    routine serves every lens.

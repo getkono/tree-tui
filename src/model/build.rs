@@ -2,10 +2,10 @@
 //! lazily-collected per-file metrics up the tree.
 //!
 //! The skeleton (structure + on-disk size + file tally) comes from the walk, so
-//! *every* non-ignored file appears — not just files a language counter
-//! recognizes. Expensive metrics arrive later as per-file maps and are folded
-//! bottom-up into a per-node [`Layer`](super::Layer) via [`aggregate`] /
-//! [`aggregate_code`].
+//! *every* file git would show appears — dot-entries included, and not just
+//! files a language counter recognizes. Expensive metrics arrive later as
+//! per-file maps and are folded bottom-up into a per-node
+//! [`Layer`](super::Layer) via [`aggregate`] / [`aggregate_code`].
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
