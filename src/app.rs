@@ -115,8 +115,6 @@ pub struct Loaded {
     /// Rows of tree visible on screen, updated each render; drives paging.
     pub viewport_rows: usize,
     pub duration: Duration,
-    /// Whether the detail panel is shown.
-    pub show_detail: bool,
     /// Whether the preview pane is enabled (it still folds away when the
     /// terminal is too narrow or short — see the renderer's thresholds).
     pub show_preview: bool,
@@ -357,8 +355,6 @@ impl App {
         match key.code {
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('/') => self.mode = Mode::Filter,
-            KeyCode::Char('d') if !ctrl => self.toggle_detail(),
-            KeyCode::Tab => self.toggle_detail(),
             KeyCode::Esc => self.clear_filter(),
             _ => self.update(action::map_key(key)),
         }
@@ -386,12 +382,6 @@ impl App {
                 }
             }
             _ => {}
-        }
-    }
-
-    fn toggle_detail(&mut self) {
-        if let Screen::Loaded(loaded) = &mut self.screen {
-            loaded.show_detail = !loaded.show_detail;
         }
     }
 
@@ -706,7 +696,6 @@ impl Loaded {
             table_state: TableState::default(),
             viewport_rows: 1,
             duration,
-            show_detail: false,
             show_preview: true,
             preview_for: None,
             preview: Preview::default(),

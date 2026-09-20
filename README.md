@@ -47,7 +47,8 @@ is instant, and you never pay for git history unless you ask for it.
 - **Sort** — by the active lens's columns (or by name / file count); reverse on demand.
 - **Declutter** — `z` hides rows that are zero under the active lens (e.g. non-code files in `code`).
 - **Filter** — live name filter that reveals matches together with their parent path.
-- **Detail panel** — a per-lens breakdown for the selected node with proportion bars and percentages.
+- **The whole row** — every row carries its own breakdown: the lens's numbers plus the file count,
+  the on-disk size, and the row's share of the tree under the active lens.
 - **File-type icons** — every row carries a glyph for its type, in whichever tier your terminal can
   render (`--icons nerd|unicode|ascii`).
 - **Preview & read anything** — highlighted code, inline images, PDF pages, or a hex dump, in a side
@@ -113,7 +114,6 @@ characters. Set `TREE_TUI_ICONS` to make the choice stick.
 | `s` | cycle the sort column (within the lens) |
 | `r` | reverse the sort order |
 | `z` | hide rows that are zero under the active lens |
-| `d` / `Tab` | toggle the detail panel |
 | `/` | filter by name (`Esc` clears) |
 | `?` | toggle help |
 | `q` / `Ctrl-c` | quit |

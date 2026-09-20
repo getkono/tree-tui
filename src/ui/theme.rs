@@ -4,8 +4,7 @@ use std::sync::OnceLock;
 
 use karet_filetype::IconStyle;
 
-use ratatui::style::{Color, Style};
-use ratatui::text::Span;
+use ratatui::style::Color;
 use tokei::LanguageType;
 
 use crate::model::{SubKey, Tint};
@@ -220,48 +219,6 @@ pub fn percent(value: usize, total: usize) -> String {
         return "0.0%".to_string();
     }
     format!("{:.1}%", value as f64 / total as f64 * 100.0)
-}
-
-/// A `width`-cell horizontal bar split across colored segments (e.g. code /
-/// comments / blanks, or added / deleted). The last segment absorbs rounding.
-pub fn segments_bar(segments: &[(usize, Color)], width: usize) -> Vec<Span<'static>> {
-    let total: usize = segments.iter().map(|(value, _)| *value).sum();
-    if total == 0 || width == 0 {
-        return vec![Span::styled("░".repeat(width), Style::default().fg(MUTED))];
-    }
-    let mut spans = Vec::new();
-    let mut used = 0;
-    for (i, (value, color)) in segments.iter().enumerate() {
-        let cells = if i + 1 == segments.len() {
-            width - used
-        } else {
-            (value * width / total).min(width - used)
-        };
-        if cells > 0 {
-            spans.push(Span::styled("█".repeat(cells), Style::default().fg(*color)));
-            used += cells;
-        }
-    }
-    spans
-}
-
-/// A `width`-cell bar filled to `value / total` in `color`, padded with `░`.
-pub fn ratio_bar(value: usize, total: usize, width: usize, color: Color) -> Vec<Span<'static>> {
-    if total == 0 || width == 0 {
-        return vec![Span::styled("░".repeat(width), Style::default().fg(MUTED))];
-    }
-    let filled = (value * width / total).min(width);
-    let mut spans = Vec::new();
-    if filled > 0 {
-        spans.push(Span::styled("█".repeat(filled), Style::default().fg(color)));
-    }
-    if filled < width {
-        spans.push(Span::styled(
-            "░".repeat(width - filled),
-            Style::default().fg(BLANKS),
-        ));
-    }
-    spans
 }
 
 /// Human-readable byte size (binary units, one decimal): `1536` → `"1.5 KB"`.

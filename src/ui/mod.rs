@@ -1,6 +1,5 @@
 //! Rendering: dispatch by screen state and lay out the top-level regions.
 
-mod detail;
 pub mod fileview;
 mod footer;
 mod header;
@@ -25,8 +24,6 @@ const PREVIEW_MIN_WIDTH: u16 = 100;
 const PREVIEW_MIN_HEIGHT: u16 = 20;
 /// Share of the body width the preview pane takes when shown.
 const PREVIEW_PCT: u16 = 40;
-/// Fixed width of the detail panel when shown.
-const DETAIL_WIDTH: u16 = 36;
 
 /// Render the current frame for `app`.
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -71,29 +68,20 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
         header_area,
     );
 
-    // Right-side panes appear as room allows: the detail panel takes a fixed
-    // column; the preview pane takes a share of the width, folding away on a
-    // narrow or short terminal.
+    // The preview pane takes a share of the width, folding away on a narrow or
+    // short terminal so the tree keeps the room.
     let show_preview = loaded.show_preview
         && body_area.width >= PREVIEW_MIN_WIDTH
         && body_area.height >= PREVIEW_MIN_HEIGHT;
 
-    let mut constraints = vec![Constraint::Min(0)];
-    if loaded.show_detail {
-        constraints.push(Constraint::Length(DETAIL_WIDTH));
-    }
-    if show_preview {
-        constraints.push(Constraint::Percentage(PREVIEW_PCT));
-    }
-    let chunks = Layout::horizontal(constraints).split(body_area);
-
-    let tree_area = chunks[0];
-    let mut next = 1;
-    if loaded.show_detail {
-        detail::render(frame, loaded, chunks[next]);
-        next += 1;
-    }
-    let preview_area = show_preview.then(|| chunks[next]);
+    let (tree_area, preview_area) = if show_preview {
+        let [tree, preview] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Percentage(PREVIEW_PCT)])
+                .areas(body_area);
+        (tree, Some(preview))
+    } else {
+        (body_area, None)
+    };
 
     // Record pane rects for the next frame's mouse hit-testing, and keep focus
     // on the tree when the preview has folded away.
@@ -510,20 +498,10 @@ mod tests {
     }
 
     #[test]
-    fn renders_detail_panel_and_help_overlay() {
+    fn renders_the_help_overlay() {
         let mut app = sample_app();
-        if let Screen::Loaded(loaded) = &mut app.screen {
-            loaded.show_detail = true;
-        }
-        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
-
-        terminal.draw(|frame| render(frame, &mut app)).unwrap();
-        let detail = format!("{}", terminal.backend());
-        assert!(detail.contains("detail"));
-        assert!(detail.contains("languages"));
-        assert!(detail.contains("Rust"));
-
         app.show_help = true;
+        let mut terminal = Terminal::new(TestBackend::new(110, 18)).unwrap();
         terminal.draw(|frame| render(frame, &mut app)).unwrap();
         let help = format!("{}", terminal.backend());
         assert!(help.contains("keybindings"));

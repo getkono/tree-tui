@@ -24,7 +24,6 @@ const BINDINGS: &[(&str, &str)] = &[
     ("r", "reverse the sort order"),
     ("z", "hide rows that are zero under the lens"),
     ("x", "exclude / include the selected node"),
-    ("d / Tab", "toggle the detail panel"),
     ("p", "toggle the preview pane"),
     ("w", "focus the tree / preview (scroll with j/k, h/l)"),
     ("y", "copy preview text · selected path"),
