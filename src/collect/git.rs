@@ -137,10 +137,61 @@ pub fn status(scan_root: &Path) -> HashMap<PathBuf, StatusData> {
     map
 }
 
+/// Every path the git index tracks, relative to the scanned root.
+///
+/// The walk alone cannot answer this: a file that is tracked *and* matches a
+/// `.gitignore` rule is still tracked, and an ignore-rule walk drops it. The
+/// skeleton unions this set in so a tracked file always has a node.
+///
+/// Returns an empty vec outside a repository, for a bare repository, or on any
+/// gix error (a torn read while `git` rewrites `.git/index`, say) — the caller
+/// then shows the walk's own set, and the next rescan corrects it.
+/// Whether `scan_root` is in a repository, and everything that repository's
+/// index tracks — from a single `discover`, since the walk needs both and this
+/// runs again on every filesystem event.
+pub fn repo_files(scan_root: &Path) -> (bool, Vec<PathBuf>) {
+    let Ok(repo) = gix::discover(scan_root) else {
+        return (false, Vec::new());
+    };
+    (true, tracked_in(&repo, scan_root))
+}
+
+fn tracked_in(repo: &gix::Repository, scan_root: &Path) -> Vec<PathBuf> {
+    // `None` here means a bare repo (no worktree files to show) or a workdir
+    // that won't relate to the scan root. Either way, bail: unlike the lens
+    // collectors — whose stray keys `aggregate` drops for want of a node —
+    // this set *creates* nodes, so a wrong prefix would fabricate them.
+    let Some(prefix) = repo_prefix(repo, scan_root) else {
+        return Vec::new();
+    };
+    let Ok(index) = repo.index_or_empty() else {
+        return Vec::new();
+    };
+    let state: &gix::index::State = &index;
+    let prefix = Some(prefix);
+    state
+        .entries()
+        .iter()
+        .filter(|entry| is_tracked_file(entry.mode))
+        .filter_map(|entry| tree_rel(entry.path(state), &prefix))
+        .collect()
+}
+
+/// Whether an index entry names a file the tree should show — excluding
+/// submodule gitlinks and the directory entries a sparse index holds, neither
+/// of which is a file on disk.
+fn is_tracked_file(mode: gix::index::entry::Mode) -> bool {
+    !mode.is_submodule() && !mode.is_sparse()
+}
+
 /// The scan root's path relative to the repository work directory (the prefix to
 /// strip from repo-relative git paths). `None` if it can't be determined.
 fn repo_prefix(repo: &gix::Repository, scan_root: &Path) -> Option<PathBuf> {
     let workdir = repo.workdir()?.canonicalize().ok()?;
+    // Canonicalize both sides: a root reached through a symlink would not
+    // strip, and `tracked_files` treats that as "no prefix" and bails — which
+    // would silently switch the tracked-file union off.
+    let scan_root = scan_root.canonicalize().ok()?;
     scan_root.strip_prefix(&workdir).ok().map(Path::to_path_buf)
 }
 

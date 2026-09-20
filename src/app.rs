@@ -302,10 +302,12 @@ impl App {
     /// Re-apply a fresh walk after a filesystem change.
     ///
     /// A no-op when the visible skeleton (paths + sizes) is unchanged, so
-    /// spurious events — builds, git internals, and other gitignored/hidden
-    /// paths absent from the walk — cost only a cheap re-walk. Otherwise the
-    /// tree is rebuilt (preserving expansion and selection by path) and the
-    /// cached metric layers are invalidated, with the active lens re-requested.
+    /// spurious events — builds, git internals, and other gitignored paths
+    /// absent from the walk — cost only a cheap re-walk. (Dot-entries are no
+    /// longer absent, so editing `.gitignore` itself now moves the skeleton.)
+    /// Otherwise the tree is rebuilt (preserving expansion and selection by
+    /// path) and the cached metric layers are invalidated, with the active lens
+    /// re-requested.
     ///
     /// The preview's freshness check runs **before** the skeleton gate. That
     /// gate compares paths and sizes only, so it is exactly what swallows an
