@@ -9,7 +9,8 @@ full design.
 - **ratatui** — TUI widget, layout, and rendering framework (the app's view layer).
 - **crossterm** — terminal backend: raw mode, input events, alternate screen.
 - **tokio** — async runtime for the input/event loop and concurrent I/O.
-- **ignore** — `.gitignore`-aware filesystem walk; builds the tree skeleton + per-file size.
+- **ignore** — `.gitignore`-aware filesystem walk (run in parallel); builds the tree skeleton
+  + per-file size.
 - **tokei** — code line counting (the `code` lens collector).
 - **gix** — pure-Rust git; the `churn`/`status` lens collectors.
 - **karet** — the toolkit behind the preview pane and the full-screen reader
@@ -40,7 +41,7 @@ for adding a lens or collector are in **`docs/ARCHITECTURE.md`**. Key modules:
   cache).
 
 Metrics are computed **lazily** (the first time a lens is opened, on a blocking thread) and **cached**
-for the session — only the cheap walk runs at startup.
+for the session — only the cheap walk runs at startup, and it traverses in parallel.
 
 ## Quality
 

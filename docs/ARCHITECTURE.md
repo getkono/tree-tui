@@ -7,7 +7,7 @@ per-tool pieces**, and computes expensive metrics **lazily** (on first use) and 
 ## Data flow
 
 ```
-walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + files, + path index)
+walk (ignore, parallel)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + files, + path index)
                                           │
    open a lens ──► request compute ──► collector (blocking thread) ──► per-file map
                                           │
@@ -16,11 +16,19 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
                        value_of / sort ──► flatten ──► render (ratatui)
 ```
 
-- The **walk** (`collect::walk`, via the `ignore` crate) runs once at startup and is cheap
-  (structure + file sizes, no contents). Its rule is "what git would show you": every tracked file
-  (unioned in from the git index, so a tracked-but-gitignored one still gets a node) plus every
-  untracked file git wouldn't ignore. Hidden-filtering is off — a dot-entry is an ordinary file —
-  so `.git`/`.jj` are pruned explicitly. Non-code files appear too.
+- The **walk** (`collect::walk`, via the `ignore` crate) is cheap (structure + file sizes, no
+  contents). Its rule is "what git would show you": every tracked file (unioned in from the git
+  index, so a tracked-but-gitignored one still gets a node) plus every untracked file git wouldn't
+  ignore. Hidden-filtering is off — a dot-entry is an ordinary file — so `.git`/`.jj` are pruned
+  explicitly. Non-code files appear too.
+- The walk **traverses in parallel** (`ignore`'s `build_parallel`, one accumulator per thread
+  merged once at the end). It is the app's only eager cost, and it runs on more than startup: every
+  debounced filesystem event re-walks the whole tree. `walk_with_sequential` is the same walk over
+  the single-threaded iterator, kept as the oracle for the differential tests and as the benchmark
+  baseline (`cargo bench`); both share the walk's `builder` and `record`, so they can differ in how
+  an entry is reached and never in what is recorded for it.
+- The walk's output **order is unspecified** — `build_skeleton` sorts both lists before building
+  the arena, and `App::same_skeleton` compares a path-to-bytes map, so only the set matters.
 - A **lens** is opened on demand. If its data isn't cached, the event loop spawns the lens's
   **collector** on a blocking thread; the result comes back over an `mpsc` channel, is **aggregated**
   bottom-up into a per-node `Layer`, and cached for the session.

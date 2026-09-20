@@ -7,11 +7,25 @@
 //! index so a tracked-but-gitignored file still gets a node. VCS bookkeeping
 //! (`.git`, `.jj`, `.hg`, `.svn`) is pruned explicitly, because `ignore`
 //! excludes it only by way of the hidden filter this module turns off.
+//!
+//! The traversal is **parallel**. It is the one eager cost in the app — it runs
+//! before the first frame, and again on every debounced filesystem event — and
+//! it is stat-bound, so it scales with threads. [`walk_with_sequential`] is the
+//! same walk over `ignore`'s single-threaded iterator, kept as the oracle the
+//! parallel traversal is differentially tested against and as the benchmark
+//! baseline; the two share [`builder`] and [`record`], so they can differ in
+//! how an entry is reached and never in what is recorded for it.
+//!
+//! The returned `files`/`dirs` are in traversal order, which the parallel walk
+//! leaves unspecified. Nothing depends on it: `build_skeleton` sorts both
+//! before building the arena, and `App::same_skeleton` compares a path-to-bytes
+//! map. The *set* is what matters, and that is what the tests pin.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
-use ignore::{DirEntry, WalkBuilder};
+use ignore::{DirEntry, ParallelVisitor, ParallelVisitorBuilder, WalkBuilder, WalkState};
 
 use super::{git, relative_path};
 
@@ -31,7 +45,39 @@ pub fn walk(root: &Path) -> WalkResult {
 
 /// The walk proper, with the git-dependent inputs passed in so the union and
 /// the ignore rules are testable without building a repository.
-fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
+///
+/// Thread count is `ignore`'s own default — `available_parallelism`, capped at
+/// 12 — rather than a number this crate invents.
+#[doc(hidden)]
+pub fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
+    let merged = Mutex::new(Findings::default());
+    builder(root, in_repo)
+        .build_parallel()
+        .visit(&mut VisitorBuilder {
+            root,
+            merged: &merged,
+        });
+
+    let Findings { mut files, dirs } = merged.into_inner().unwrap_or_else(PoisonError::into_inner);
+    union_tracked(root, &mut files, tracked);
+
+    WalkResult { files, dirs }
+}
+
+/// [`walk`] over `ignore`'s single-threaded iterator.
+///
+/// Retained as the oracle the parallel walk is differentially tested against
+/// and as the benchmark baseline. Production never calls it.
+#[doc(hidden)]
+pub fn walk_sequential(root: &Path) -> WalkResult {
+    let (in_repo, tracked) = git::repo_files(root);
+    walk_with_sequential(root, &tracked, in_repo)
+}
+
+/// [`walk_with`] over `ignore`'s single-threaded iterator. See
+/// [`walk_sequential`] for why it is kept.
+#[doc(hidden)]
+pub fn walk_with_sequential(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
     let mut dirs = Vec::new();
 
@@ -45,6 +91,68 @@ fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
     union_tracked(root, &mut files, tracked);
 
     WalkResult { files, dirs }
+}
+
+/// What one traversal thread found, and — once merged — what all of them did.
+#[derive(Default)]
+struct Findings {
+    files: Vec<(PathBuf, u64)>,
+    dirs: Vec<PathBuf>,
+}
+
+/// Hands `ignore` one [`Visitor`] per traversal thread.
+struct VisitorBuilder<'a> {
+    root: &'a Path,
+    merged: &'a Mutex<Findings>,
+}
+
+impl<'s> ParallelVisitorBuilder<'s> for VisitorBuilder<'s> {
+    fn build(&mut self) -> Box<dyn ParallelVisitor + 's> {
+        Box::new(Visitor {
+            root: self.root,
+            local: Findings::default(),
+            merged: self.merged,
+        })
+    }
+}
+
+/// One traversal thread. It accumulates into `local` and takes the lock exactly
+/// once, on the way out — a walk is millions of cheap entries, and contending a
+/// mutex per entry would hand back everything the threads win.
+///
+/// `WalkParallel::visit` runs its workers inside `std::thread::scope`, so
+/// borrowing the root and the shared sink from the caller's frame is sound and
+/// no `Arc` is needed.
+struct Visitor<'a> {
+    root: &'a Path,
+    local: Findings,
+    merged: &'a Mutex<Findings>,
+}
+
+impl ParallelVisitor for Visitor<'_> {
+    fn visit(&mut self, result: Result<DirEntry, ignore::Error>) -> WalkState {
+        let Ok(entry) = result else {
+            return WalkState::Continue; // unreadable entry: skip, don't fail the scan
+        };
+        record(
+            &entry,
+            self.root,
+            &mut self.local.files,
+            &mut self.local.dirs,
+        );
+        WalkState::Continue
+    }
+}
+
+impl Drop for Visitor<'_> {
+    fn drop(&mut self) {
+        // `into_inner` rather than `unwrap` on a poisoned lock: this also runs
+        // while unwinding from a panicking worker, and panicking here would
+        // turn that into a double panic, which aborts.
+        let mut merged = self.merged.lock().unwrap_or_else(PoisonError::into_inner);
+        merged.files.append(&mut self.local.files);
+        merged.dirs.append(&mut self.local.dirs);
+    }
 }
 
 /// The walk's configuration, in one place so the traversal can never be the
@@ -450,6 +558,46 @@ mod tests {
         );
     }
 
+    /// A walk result reduced to two sorted lists, so two walks compare by what
+    /// they found rather than by the order threads happened to finish in.
+    pub(super) fn normalized(result: &WalkResult) -> (Vec<(PathBuf, u64)>, Vec<PathBuf>) {
+        let mut files = result.files.clone();
+        let mut dirs = result.dirs.clone();
+        files.sort();
+        dirs.sort();
+        (files, dirs)
+    }
+
+    /// The two traversals must agree on a real checkout: a real index, real
+    /// ignore rules, a real `target/` to prune, and a directory shape no
+    /// fixture here is untidy enough to reproduce.
+    #[test]
+    fn the_two_traversals_agree_on_this_checkout() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert_eq!(
+            normalized(&walk(root)),
+            normalized(&walk_sequential(root)),
+            "the parallel walk found a different tree than the sequential one"
+        );
+    }
+
+    /// The parallel walk's set must not move between runs, however the workers
+    /// interleave. `App::same_skeleton` compares paths and sizes, so a walk that
+    /// wobbled would rebuild the arena and drop all three cached metric layers
+    /// on a rescan that changed nothing.
+    #[test]
+    fn repeated_parallel_walks_find_the_same_set() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let first = normalized(&walk(root));
+        for run in 1..10 {
+            assert_eq!(
+                normalized(&walk(root)),
+                first,
+                "run {run} disagreed with the first"
+            );
+        }
+    }
+
     /// This crate's own checkout, which tracks dot-entries. Inert when built
     /// outside a repository (the published tarball has no `.git`).
     #[test]
@@ -532,7 +680,7 @@ mod props {
 
     use proptest::prelude::*;
 
-    use super::tests::TempRoot;
+    use super::tests::{TempRoot, normalized};
     use super::*;
 
     /// The alphabet generated paths are drawn from.
@@ -699,6 +847,23 @@ mod props {
             keys.sort();
             keys.dedup();
             prop_assert_eq!(keys.len(), total, "a path was reported more than once");
+        }
+
+        /// The parallel walk and the sequential one find the same files, at the
+        /// same sizes, and the same directories.
+        ///
+        /// This is the whole justification for traversing in parallel:
+        /// `build_skeleton` sorts both lists before building the arena, so the
+        /// *set* is the contract and the order is not.
+        #[test]
+        fn the_two_traversals_agree(spec in arb_spec()) {
+            let root = TempRoot::new("prop");
+            let tracked = spec.materialize(&root);
+
+            let parallel = walk_with(root.path(), &tracked, spec.in_repo);
+            let sequential = walk_with_sequential(root.path(), &tracked, spec.in_repo);
+
+            prop_assert_eq!(normalized(&parallel), normalized(&sequential));
         }
 
         /// VCS bookkeeping never appears, as a file or as a directory. `ignore`
