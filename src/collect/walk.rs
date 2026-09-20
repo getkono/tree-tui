@@ -64,18 +64,11 @@ pub fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult 
     WalkResult { files, dirs }
 }
 
-/// [`walk`] over `ignore`'s single-threaded iterator.
+/// [`walk_with`] over `ignore`'s single-threaded iterator.
 ///
-/// Retained as the oracle the parallel walk is differentially tested against
-/// and as the benchmark baseline. Production never calls it.
-#[doc(hidden)]
-pub fn walk_sequential(root: &Path) -> WalkResult {
-    let (in_repo, tracked) = git::repo_files(root);
-    walk_with_sequential(root, &tracked, in_repo)
-}
-
-/// [`walk_with`] over `ignore`'s single-threaded iterator. See
-/// [`walk_sequential`] for why it is kept.
+/// Retained as the oracle the parallel traversal is differentially tested
+/// against and as the benchmark baseline — `#[cfg(test)]` would put it out of
+/// reach of `benches/`, which is a separate crate. Production never calls it.
 #[doc(hidden)]
 pub fn walk_with_sequential(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
@@ -571,30 +564,65 @@ mod tests {
     /// The two traversals must agree on a real checkout: a real index, real
     /// ignore rules, a real `target/` to prune, and a directory shape no
     /// fixture here is untidy enough to reproduce.
+    ///
+    /// The index is read once and handed to both. `walk` would re-read it per
+    /// call, and a `git` process rewriting `.git/index` mid-test — this suite
+    /// also runs from a pre-commit hook — would then look like a traversal that
+    /// disagreed with itself.
     #[test]
     fn the_two_traversals_agree_on_this_checkout() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let (in_repo, tracked) = git::repo_files(root);
+
         assert_eq!(
-            normalized(&walk(root)),
-            normalized(&walk_sequential(root)),
+            normalized(&walk_with(root, &tracked, in_repo)),
+            normalized(&walk_with_sequential(root, &tracked, in_repo)),
             "the parallel walk found a different tree than the sequential one"
         );
     }
 
-    /// The parallel walk's set must not move between runs, however the workers
-    /// interleave. `App::same_skeleton` compares paths and sizes, so a walk that
-    /// wobbled would rebuild the arena and drop all three cached metric layers
-    /// on a rescan that changed nothing.
+    /// A tree wide enough that the traversal genuinely fans out, walked
+    /// repeatedly.
+    ///
+    /// `ignore` hands work out one directory at a time and stealing is lazy, so
+    /// on the handful of directories a generated fixture holds the spare
+    /// workers usually find nothing before the walk is over — which would leave
+    /// the property differential comparing an effectively single-threaded
+    /// parallel walk against the sequential one. 64 sibling directories give
+    /// the workers something to steal, so this is where several `Visitor`s
+    /// really do accumulate and the `Drop`-time merge is under test: a flush
+    /// that lost a worker's findings shows up as a short count.
+    ///
+    /// Repeating it also pins the stability `App::same_skeleton` depends on —
+    /// a set that wobbled between walks would rebuild the arena and drop all
+    /// three cached metric layers on a rescan that changed nothing. Unlike the
+    /// checkout above, this root is ours, so nothing but scheduling can vary.
     #[test]
-    fn repeated_parallel_walks_find_the_same_set() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let first = normalized(&walk(root));
-        for run in 1..10 {
+    fn a_wide_tree_fans_out_and_merges_every_worker() {
+        const DIRS: usize = 64;
+        const PER_DIR: usize = 8;
+
+        let root = TempRoot::new("wide");
+        for d in 0..DIRS {
+            for f in 0..PER_DIR {
+                root.write(&format!("d{d}/f{f}.rs"), "fn f() {}\n");
+            }
+        }
+        let expected = normalized(&walk_with_sequential(root.path(), &[], false));
+
+        for run in 0..20 {
+            let result = walk_with(root.path(), &[], false);
             assert_eq!(
-                normalized(&walk(root)),
-                first,
-                "run {run} disagreed with the first"
+                result.files.len(),
+                DIRS * PER_DIR,
+                "run {run}: a worker's findings went missing in the merge"
             );
+            assert_eq!(
+                result.dirs.len(),
+                DIRS,
+                "run {run}: a directory went missing"
+            );
+            assert_eq!(normalized(&result), expected, "run {run} disagreed");
         }
     }
 
@@ -720,16 +748,21 @@ mod props {
         paths: Vec<Vec<&'static str>>,
         /// Lines written to a root `.gitignore`, if any.
         ignore_rules: Vec<&'static str>,
-        /// Indices into `paths`, with repeats — a merge-conflicted index holds
-        /// the same path once per stage.
-        tracked: Vec<usize>,
+        /// Selections from `paths`, with repeats — a merge-conflicted index
+        /// holds the same path once per stage.
+        tracked: Vec<prop::sample::Index>,
         /// Whether the walk is told it is inside a repository, which scopes
         /// `require_git` and so decides whether `.gitignore` applies at all.
         in_repo: bool,
-        /// `(target path index, kind)` for symlinks placed at the root.
-        links: Vec<(usize, u8)>,
+        /// `(target selection, kind)` for symlinks placed at the root.
+        links: Vec<(prop::sample::Index, u8)>,
     }
 
+    /// `prop::sample::Index` rather than a `0..N` range: it resolves against the
+    /// actual length of `paths`, so every generated tracked entry and every
+    /// generated symlink names a path that exists. A fixed range against a
+    /// variable-length list silently drops roughly half of them, and the
+    /// survivors skew to the lowest indices.
     fn arb_spec() -> impl Strategy<Value = Spec> {
         (
             prop::collection::vec(
@@ -737,9 +770,9 @@ mod props {
                 1..=24,
             ),
             prop::collection::vec(prop::sample::select(NAMES), 0..=3),
-            prop::collection::vec(0usize..24, 0..=8),
+            prop::collection::vec(any::<prop::sample::Index>(), 0..=8),
             any::<bool>(),
-            prop::collection::vec((0usize..24, 0u8..3), 0..=3),
+            prop::collection::vec((any::<prop::sample::Index>(), 0u8..3), 0..=3),
         )
             .prop_map(|(paths, ignore_rules, tracked, in_repo, links)| Spec {
                 paths,
@@ -768,7 +801,7 @@ mod props {
 
             self.tracked
                 .iter()
-                .filter_map(|&i| self.paths.get(i))
+                .map(|i| i.get(&self.paths))
                 // A real git index never holds a path under `.git/` — the union
                 // trusts its input and would happily add one, so modelling that
                 // would be testing a state git cannot produce.
@@ -779,16 +812,15 @@ mod props {
 
         #[cfg(unix)]
         fn place_links(&self, root: &TempRoot) {
-            for (n, &(target, kind)) in self.links.iter().enumerate() {
+            for (n, (target, kind)) in self.links.iter().enumerate() {
                 let target = match kind {
                     // A link to a generated path (a file, if that path landed).
-                    0 => self.paths.get(target).map(|c| c.join("/")),
+                    0 => target.get(&self.paths).join("/"),
                     // A link to a directory that exists: the root itself.
-                    1 => Some(".".to_string()),
+                    1 => ".".to_string(),
                     // A broken link.
-                    _ => Some("nowhere-at-all".to_string()),
+                    _ => "nowhere-at-all".to_string(),
                 };
-                let Some(target) = target else { continue };
                 let _ = std::os::unix::fs::symlink(target, root.path().join(format!("link{n}")));
             }
         }
