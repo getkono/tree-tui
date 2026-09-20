@@ -31,52 +31,66 @@ pub fn walk(root: &Path) -> WalkResult {
 
 /// The walk proper, with the git-dependent inputs passed in so the union and
 /// the ignore rules are testable without building a repository.
-///
-/// `in_repo` scopes `require_git`: inside a repository the `ignore` defaults
-/// stand, so `.git/info/exclude` and gitdir files (linked worktrees and
-/// submodules keep `.git` as a *file*) resolve as git resolves them. Outside
-/// one, `require_git(false)` is what makes a stray `.gitignore` apply at all.
 fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
     let mut files: Vec<(PathBuf, u64)> = Vec::new();
     let mut dirs = Vec::new();
 
-    let mut builder = WalkBuilder::new(root);
-    builder
-        .hidden(false)
-        .require_git(in_repo)
-        .filter_entry(|entry| !is_vcs_dir(entry));
-
-    for result in builder.build() {
+    for result in builder(root, in_repo).build() {
         let Ok(entry) = result else {
             continue; // unreadable entry: skip rather than fail the whole scan
         };
-        let rel = relative_path(entry.path(), root);
-        if rel.as_os_str().is_empty() {
-            continue; // the root itself is the tree root node
-        }
-        match entry.file_type() {
-            Some(ft) if ft.is_dir() => dirs.push(rel),
-            Some(ft) if ft.is_file() => {
-                let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                files.push((rel, bytes));
-            }
-            // A symlink (never followed) is a file: that is how git stores one,
-            // and `metadata` here is `symlink_metadata`, so the size is the
-            // link's own — git's blob size — not the target's. Links *to a
-            // directory* stay out: they would become file nodes the preview
-            // then tried to read as a file.
-            Some(ft) if ft.is_symlink() && !links_to_dir(entry.path()) => {
-                let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                files.push((rel, bytes));
-            }
-            // Directory symlinks and special files (sockets, fifos, devices).
-            _ => {}
-        }
+        record(&entry, root, &mut files, &mut dirs);
     }
 
     union_tracked(root, &mut files, tracked);
 
     WalkResult { files, dirs }
+}
+
+/// The walk's configuration, in one place so the traversal can never be the
+/// thing that changes which files are shown.
+///
+/// `in_repo` scopes `require_git`: inside a repository the `ignore` defaults
+/// stand, so `.git/info/exclude` and gitdir files (linked worktrees and
+/// submodules keep `.git` as a *file*) resolve as git resolves them. Outside
+/// one, `require_git(false)` is what makes a stray `.gitignore` apply at all.
+fn builder(root: &Path, in_repo: bool) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .require_git(in_repo)
+        .filter_entry(|entry| !is_vcs_dir(entry));
+    builder
+}
+
+/// Classify one walked entry into the file and directory buckets.
+///
+/// Everything the walk *decides* lives here rather than in a traversal loop, so
+/// the two traversals can differ in how they reach an entry and never in what
+/// they record for it.
+fn record(entry: &DirEntry, root: &Path, files: &mut Vec<(PathBuf, u64)>, dirs: &mut Vec<PathBuf>) {
+    let rel = relative_path(entry.path(), root);
+    if rel.as_os_str().is_empty() {
+        return; // the root itself is the tree root node
+    }
+    match entry.file_type() {
+        Some(ft) if ft.is_dir() => dirs.push(rel),
+        Some(ft) if ft.is_file() => {
+            let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            files.push((rel, bytes));
+        }
+        // A symlink (never followed) is a file: that is how git stores one,
+        // and `metadata` here is `symlink_metadata`, so the size is the
+        // link's own — git's blob size — not the target's. Links *to a
+        // directory* stay out: they would become file nodes the preview
+        // then tried to read as a file.
+        Some(ft) if ft.is_symlink() && !links_to_dir(entry.path()) => {
+            let bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            files.push((rel, bytes));
+        }
+        // Directory symlinks and special files (sockets, fifos, devices).
+        _ => {}
+    }
 }
 
 /// Add tracked paths the walk didn't already yield — a tracked file matching a
@@ -146,31 +160,49 @@ fn links_to_dir(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
 
     /// A real directory under the system temp dir, removed on drop. The walk is
     /// filesystem I/O all the way down, so there is nothing pure to test here;
     /// this mirrors the `TempRoot` fixture in `app`'s tests.
-    struct TempRoot(PathBuf);
+    pub(super) struct TempRoot(PathBuf);
 
     impl TempRoot {
-        fn new(tag: &str) -> Self {
+        pub(super) fn new(tag: &str) -> Self {
+            // The nonce is what makes this reusable from a property test, which
+            // materializes many trees per thread: pid + thread id alone repeat.
+            static NONCE: AtomicU64 = AtomicU64::new(0);
             let dir = std::env::temp_dir().join(format!(
-                "tree-tui-walk-{tag}-{}-{:?}",
+                "tree-tui-walk-{tag}-{}-{:?}-{}",
                 std::process::id(),
-                std::thread::current().id()
+                std::thread::current().id(),
+                NONCE.fetch_add(1, Ordering::Relaxed)
             ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("create the temp root");
             Self(dir)
         }
 
+        pub(super) fn path(&self) -> &Path {
+            &self.0
+        }
+
         fn write(&self, rel: &str, body: &str) {
+            self.try_write(rel, body).expect("write a fixture file");
+        }
+
+        /// [`write`](Self::write) for generated paths, where a failure is
+        /// expected and meaningful: a wish list can name `a/b` and `a` both, and
+        /// only one of a file and a directory can exist at `a`. The walk reads
+        /// whatever landed.
+        pub(super) fn try_write(&self, rel: &str, body: &str) -> std::io::Result<()> {
             let path = self.0.join(rel);
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).expect("create a fixture dir");
+                std::fs::create_dir_all(parent)?;
             }
-            std::fs::write(path, body).expect("write a fixture file");
+            std::fs::write(path, body)
         }
 
         /// The walk's file set, as sorted strings for readable assertions.
@@ -482,5 +514,234 @@ mod tests {
             Some("README.md".len() as u64),
             "size is the link's own bytes (git's blob size), not the target's"
         );
+    }
+}
+
+/// Property tests over generated directory trees.
+///
+/// The example tests above each pin one rule. These pin the rules that must
+/// hold for *every* tree: that the walk reports real, non-directory files at
+/// their own size, exactly once each; that VCS bookkeeping never leaks; and
+/// that the tracked-file union adds what git tracks without duplicating it.
+///
+/// They exist to ground the walk's behaviour independently of how it traverses,
+/// so that swapping the traversal is a change no test has to be edited for.
+#[cfg(test)]
+mod props {
+    use std::path::Component;
+
+    use proptest::prelude::*;
+
+    use super::tests::TempRoot;
+    use super::*;
+
+    /// The alphabet generated paths are drawn from.
+    ///
+    /// Deliberately tiny, and deliberately made of names that *mean* something
+    /// to the walk. With a large alphabet a generated tree is a pile of
+    /// unrelated files and the interesting cases — a path colliding with a
+    /// directory, an ignore rule that actually matches, VCS bookkeeping in the
+    /// way — essentially never occur.
+    const NAMES: &[&str] = &[
+        "a",
+        "b",
+        "dir",
+        "nested",
+        ".hidden",
+        ".env",
+        ".git",
+        ".jj",
+        ".hg",
+        ".svn",
+        ".gitignore",
+        ".ignore",
+        "build",
+        "target",
+        "vendor",
+    ];
+
+    /// VCS bookkeeping directories, which no walk may ever report through.
+    const VCS: &[&str] = &[".git", ".jj", ".hg", ".svn"];
+
+    /// A wish list for a directory tree. Nothing here is guaranteed to land —
+    /// a file cannot be created under a path that is already a file — and that
+    /// is the point: the disk is the truth, and both traversals see the same disk.
+    #[derive(Debug, Clone)]
+    pub(super) struct Spec {
+        /// Each path is a component list; the last component names the file.
+        paths: Vec<Vec<&'static str>>,
+        /// Lines written to a root `.gitignore`, if any.
+        ignore_rules: Vec<&'static str>,
+        /// Indices into `paths`, with repeats — a merge-conflicted index holds
+        /// the same path once per stage.
+        tracked: Vec<usize>,
+        /// Whether the walk is told it is inside a repository, which scopes
+        /// `require_git` and so decides whether `.gitignore` applies at all.
+        in_repo: bool,
+        /// `(target path index, kind)` for symlinks placed at the root.
+        links: Vec<(usize, u8)>,
+    }
+
+    fn arb_spec() -> impl Strategy<Value = Spec> {
+        (
+            prop::collection::vec(
+                prop::collection::vec(prop::sample::select(NAMES), 1..=4),
+                1..=24,
+            ),
+            prop::collection::vec(prop::sample::select(NAMES), 0..=3),
+            prop::collection::vec(0usize..24, 0..=8),
+            any::<bool>(),
+            prop::collection::vec((0usize..24, 0u8..3), 0..=3),
+        )
+            .prop_map(|(paths, ignore_rules, tracked, in_repo, links)| Spec {
+                paths,
+                ignore_rules,
+                tracked,
+                in_repo,
+                links,
+            })
+    }
+
+    impl Spec {
+        /// Write the tree and return the tracked list the walk should be given.
+        fn materialize(&self, root: &TempRoot) -> Vec<PathBuf> {
+            for comps in &self.paths {
+                let _ = root.try_write(&comps.join("/"), "x\n");
+            }
+            if !self.ignore_rules.is_empty() {
+                let body = self
+                    .ignore_rules
+                    .iter()
+                    .map(|r| format!("{r}\n"))
+                    .collect::<String>();
+                let _ = root.try_write(".gitignore", &body);
+            }
+            self.place_links(root);
+
+            self.tracked
+                .iter()
+                .filter_map(|&i| self.paths.get(i))
+                // A real git index never holds a path under `.git/` — the union
+                // trusts its input and would happily add one, so modelling that
+                // would be testing a state git cannot produce.
+                .filter(|comps| !comps.iter().any(|c| VCS.contains(c)))
+                .map(|comps| PathBuf::from(comps.join("/")))
+                .collect()
+        }
+
+        #[cfg(unix)]
+        fn place_links(&self, root: &TempRoot) {
+            for (n, &(target, kind)) in self.links.iter().enumerate() {
+                let target = match kind {
+                    // A link to a generated path (a file, if that path landed).
+                    0 => self.paths.get(target).map(|c| c.join("/")),
+                    // A link to a directory that exists: the root itself.
+                    1 => Some(".".to_string()),
+                    // A broken link.
+                    _ => Some("nowhere-at-all".to_string()),
+                };
+                let Some(target) = target else { continue };
+                let _ = std::os::unix::fs::symlink(target, root.path().join(format!("link{n}")));
+            }
+        }
+
+        #[cfg(not(unix))]
+        fn place_links(&self, _root: &TempRoot) {}
+    }
+
+    /// Materialize `spec` and walk it, returning the fixture alongside the
+    /// result so the assertions can stat the disk the walk just read.
+    fn walked(spec: &Spec) -> (TempRoot, Vec<PathBuf>, WalkResult) {
+        let root = TempRoot::new("prop");
+        let tracked = spec.materialize(&root);
+        let result = walk_with(root.path(), &tracked, spec.in_repo);
+        (root, tracked, result)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+
+        /// Every reported file is a real, non-directory path under the root,
+        /// carrying its own size, listed exactly once.
+        ///
+        /// The "exactly once" half is what `build_skeleton` trusts: it pushes a
+        /// node per entry without consulting its index, so a duplicate would
+        /// double the file's bytes in every ancestor total.
+        #[test]
+        fn reported_files_are_real_sized_and_unique(spec in arb_spec()) {
+            let (root, _, result) = walked(&spec);
+
+            for (rel, bytes) in &result.files {
+                prop_assert!(rel.is_relative(), "{} is not relative", rel.display());
+                prop_assert!(
+                    rel.components().all(|c| matches!(c, Component::Normal(_))),
+                    "{} escapes the root", rel.display()
+                );
+
+                let abs = root.path().join(rel);
+                let meta = std::fs::symlink_metadata(&abs);
+                prop_assert!(meta.is_ok(), "{} was reported but is not on disk", rel.display());
+                let meta = meta.expect("checked just above");
+
+                prop_assert!(!meta.is_dir(), "{} is a directory", rel.display());
+                prop_assert!(
+                    !(meta.is_symlink() && links_to_dir(&abs)),
+                    "{} is a symlink to a directory", rel.display()
+                );
+                prop_assert_eq!(
+                    *bytes, meta.len(),
+                    "{} reported the wrong size", rel.display()
+                );
+            }
+
+            let mut keys: Vec<PathBuf> = result.files.iter().map(|(r, _)| dedupe_key(r)).collect();
+            let total = keys.len();
+            keys.sort();
+            keys.dedup();
+            prop_assert_eq!(keys.len(), total, "a path was reported more than once");
+        }
+
+        /// VCS bookkeeping never appears, as a file or as a directory. `ignore`
+        /// drops it only via the hidden filter, which this module turns off, so
+        /// this is entirely on `filter_entry`.
+        #[test]
+        fn vcs_bookkeeping_is_never_reported(spec in arb_spec()) {
+            let (_root, _, result) = walked(&spec);
+
+            let reported = result.files.iter().map(|(r, _)| r).chain(result.dirs.iter());
+            for rel in reported {
+                prop_assert!(
+                    !rel.components().any(|c| matches!(
+                        c, Component::Normal(name) if name.to_str().is_some_and(|n| VCS.contains(&n))
+                    )),
+                    "{} is VCS bookkeeping", rel.display()
+                );
+            }
+        }
+
+        /// Every tracked path that exists on disk as a file gets exactly one
+        /// entry — whether the walk found it or the union added it, and however
+        /// many conflict stages the index repeats it for.
+        #[test]
+        fn tracked_files_on_disk_are_reported_exactly_once(spec in arb_spec()) {
+            let (root, tracked, result) = walked(&spec);
+
+            for rel in &tracked {
+                let abs = root.path().join(rel);
+                let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+                    continue; // staged for deletion, or the write never landed
+                };
+                if meta.is_dir() || (meta.is_symlink() && links_to_dir(&abs)) {
+                    continue; // a gitlink or sparse entry is not a file node
+                }
+
+                let key = dedupe_key(rel);
+                let count = result.files.iter().filter(|(r, _)| dedupe_key(r) == key).count();
+                prop_assert_eq!(
+                    count, 1,
+                    "tracked {} was reported {} times", rel.display(), count
+                );
+            }
+        }
     }
 }
