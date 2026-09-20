@@ -50,6 +50,16 @@ pub fn walk(root: &Path) -> WalkResult {
 /// 12 — rather than a number this crate invents.
 #[doc(hidden)]
 pub fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
+    walk_parallel(root, tracked, in_repo).0
+}
+
+/// [`walk_with`], plus how many traversal threads contributed findings.
+///
+/// The count is what lets a test assert the traversal actually fanned out. The
+/// differential against the sequential walk says nothing about the per-thread
+/// merge if only one thread ever accumulated, and on a narrow tree that is
+/// exactly what happens — `ignore` hands work out one directory at a time.
+fn walk_parallel(root: &Path, tracked: &[PathBuf], in_repo: bool) -> (WalkResult, usize) {
     let merged = Mutex::new(Findings::default());
     builder(root, in_repo)
         .build_parallel()
@@ -58,10 +68,14 @@ pub fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult 
             merged: &merged,
         });
 
-    let Findings { mut files, dirs } = merged.into_inner().unwrap_or_else(PoisonError::into_inner);
+    let Findings {
+        mut files,
+        dirs,
+        workers,
+    } = merged.into_inner().unwrap_or_else(PoisonError::into_inner);
     union_tracked(root, &mut files, tracked);
 
-    WalkResult { files, dirs }
+    (WalkResult { files, dirs }, workers)
 }
 
 /// [`walk_with`] over `ignore`'s single-threaded iterator.
@@ -91,6 +105,11 @@ pub fn walk_with_sequential(root: &Path, tracked: &[PathBuf], in_repo: bool) -> 
 struct Findings {
     files: Vec<(PathBuf, u64)>,
     dirs: Vec<PathBuf>,
+    /// How many threads contributed anything. `ignore` builds one visitor per
+    /// thread *plus* a transient one for seeding the roots, so counting only
+    /// non-empty flushes is what separates a walk that fanned out from one that
+    /// ran on a single worker.
+    workers: usize,
 }
 
 /// Hands `ignore` one [`Visitor`] per traversal thread.
@@ -143,6 +162,9 @@ impl Drop for Visitor<'_> {
         // while unwinding from a panicking worker, and panicking here would
         // turn that into a double panic, which aborts.
         let mut merged = self.merged.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.local.files.is_empty() || !self.local.dirs.is_empty() {
+            merged.workers += 1;
+        }
         merged.files.append(&mut self.local.files);
         merged.dirs.append(&mut self.local.dirs);
     }
@@ -589,9 +611,9 @@ mod tests {
     /// workers usually find nothing before the walk is over — which would leave
     /// the property differential comparing an effectively single-threaded
     /// parallel walk against the sequential one. 64 sibling directories give
-    /// the workers something to steal, so this is where several `Visitor`s
-    /// really do accumulate and the `Drop`-time merge is under test: a flush
-    /// that lost a worker's findings shows up as a short count.
+    /// the workers something to steal, and the contributor count asserts they
+    /// took it — so this is where the `Drop`-time merge is genuinely under
+    /// test: a flush that lost a worker's findings shows up as a short count.
     ///
     /// Repeating it also pins the stability `App::same_skeleton` depends on —
     /// a set that wobbled between walks would rebuild the arena and drop all
@@ -610,8 +632,12 @@ mod tests {
         }
         let expected = normalized(&walk_with_sequential(root.path(), &[], false));
 
+        // On a single-core machine there is nothing to fan out to and `ignore`
+        // runs one worker. The counts still hold; only the fan-out claim lapses.
+        let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
+
         for run in 0..20 {
-            let result = walk_with(root.path(), &[], false);
+            let (result, workers) = walk_parallel(root.path(), &[], false);
             assert_eq!(
                 result.files.len(),
                 DIRS * PER_DIR,
@@ -623,6 +649,12 @@ mod tests {
                 "run {run}: a directory went missing"
             );
             assert_eq!(normalized(&result), expected, "run {run} disagreed");
+            if cores > 1 {
+                assert!(
+                    workers >= 2,
+                    "run {run}: only {workers} worker contributed, so the merge was never exercised"
+                );
+            }
         }
     }
 

@@ -153,8 +153,15 @@ fn synthetic_sizes() -> Vec<usize> {
     };
     let mut sizes: Vec<usize> = raw
         .split(',')
-        .filter_map(|part| part.trim().parse().ok())
-        .filter(|&n: &usize| n > 0)
+        .filter_map(|part| match part.trim().parse::<usize>() {
+            Ok(n) if n > 0 => Some(n),
+            // Say so: a typo that silently benched one fewer size would just
+            // look like the sweep had a gap.
+            _ => {
+                eprintln!("ignoring unusable size in TREE_TUI_BENCH_FILES: {part:?}");
+                None
+            }
+        })
         .collect();
     // Two equal sizes would name the same criterion group twice.
     sizes.sort_unstable();

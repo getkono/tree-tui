@@ -1,7 +1,7 @@
 //! Modular data collectors and the lazy lens-computation entry point.
 //!
 //! Each collector is an independent data source keyed by relative path:
-//! [`walk`] (skeleton + size, run eagerly at startup) and [`code`] (tokei, run
+//! [`walk()`] (skeleton + size, run eagerly at startup) and `code` (tokei, run
 //! lazily). Git collectors arrive in a later phase. [`compute`] runs the
 //! collector for one lens on a background thread; the app aggregates the result
 //! into a cached [`Layer`](crate::model::Layer).
