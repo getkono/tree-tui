@@ -6,10 +6,11 @@
 //! prints its report to a clean screen. Every successful [`init`] must be
 //! paired with a [`restore`] on the way out.
 //!
-//! Mouse capture is enabled so the UI can wheel-scroll panes and focus the pane
-//! you scroll or click. The tradeoff: while capture is on, the terminal's native
-//! click-drag text selection is intercepted — use the in-app yank (OSC 52) or
-//! the release-capture toggle ([`set_mouse_capture`]) to copy with the mouse.
+//! Mouse capture is enabled so the UI can wheel-scroll panes, focus the pane you
+//! scroll or click, and drag the divider between the tree and the preview. The
+//! tradeoff: while capture is on, the terminal's native click-drag text
+//! selection is intercepted — use the in-app yank (OSC 52) or the
+//! release-capture toggle ([`set_mouse_capture`]) to copy with the mouse.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -27,7 +28,8 @@ static MOUSE_CAPTURED: AtomicBool = AtomicBool::new(false);
 ///
 /// Also asks the terminal — when it supports the kitty keyboard protocol — to
 /// disambiguate key events, so `Shift+Enter` arrives distinct from `Enter`, and
-/// enables mouse capture for wheel scrolling and click-to-focus.
+/// enables mouse capture for wheel scrolling, click-to-focus, and the divider
+/// drag.
 pub fn init() -> std::io::Result<DefaultTerminal> {
     let terminal = ratatui::try_init()?;
     push_keyboard_enhancement();
@@ -71,22 +73,28 @@ pub fn restore() {
 pub fn set_mouse_capture(on: bool) -> std::io::Result<()> {
     use std::io::Write;
 
-    // Enable only button + wheel reporting (mode 1000) with SGR coordinates
-    // (1006). We deliberately skip motion tracking (1002 drag, 1003 any-motion):
-    // the UI is interact-to-focus, so hover/drag events are useless, and
-    // any-motion tracking streams an event for every pixel of mouse movement —
-    // that flood is what made the TUI feel unresponsive. crossterm's
-    // `EnableMouseCapture` turns 1002/1003 on, so we write the modes we want
-    // directly instead.
     let mut out = std::io::stdout();
-    if on {
-        out.write_all(b"\x1b[?1000h\x1b[?1006h")?;
-    } else {
-        out.write_all(b"\x1b[?1006l\x1b[?1000l")?;
-    }
+    out.write_all(capture_sequence(on))?;
     out.flush()?;
     MOUSE_CAPTURED.store(on, Ordering::Relaxed);
     Ok(())
+}
+
+/// The escape sequence that turns mouse reporting on or off.
+///
+/// Button + wheel reporting (mode 1000) and button-event tracking (1002), with
+/// SGR coordinates (1006). 1002 reports motion *only while a button is held*,
+/// which is exactly what the divider drag needs and costs nothing while the
+/// pointer is idle. We still deliberately skip 1003 (any-motion): it streams an
+/// event for every pixel of mouse movement, and that flood is what made the TUI
+/// feel unresponsive. crossterm's `EnableMouseCapture` turns 1003 on too, so we
+/// write the modes we want directly instead.
+fn capture_sequence(on: bool) -> &'static [u8] {
+    if on {
+        b"\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+    } else {
+        b"\x1b[?1006l\x1b[?1002l\x1b[?1000l"
+    }
 }
 
 /// Whether mouse capture is currently on.
@@ -173,5 +181,41 @@ fn pop_keyboard_enhancement() {
 
     if KEYBOARD_ENHANCED.load(Ordering::Relaxed) {
         let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The divider drag lives or dies by mode 1002: without it the terminal
+    /// reports presses but no held motion, and the seam simply never moves.
+    /// Mode 1003 must stay out — it reports *every* pointer movement, which is
+    /// the flood this module's doc warns about.
+    #[test]
+    fn mouse_capture_tracks_held_motion_but_not_idle_motion() {
+        let on = capture_sequence(true);
+        for mode in [&b"?1000h"[..], b"?1002h", b"?1006h"] {
+            assert!(
+                on.windows(mode.len()).any(|w| w == mode),
+                "enable sequence is missing {:?}",
+                std::str::from_utf8(mode).unwrap()
+            );
+        }
+        assert!(
+            !on.windows(6).any(|w| w == b"?1003h"),
+            "any-motion tracking must stay off"
+        );
+
+        // Every mode turned on is turned back off, or it outlives the TUI.
+        let off = capture_sequence(false);
+        for mode in [&b"1000"[..], b"1002", b"1006"] {
+            let disabled: Vec<u8> = mode.iter().copied().chain(*b"l").collect();
+            assert!(
+                off.windows(disabled.len()).any(|w| w == disabled),
+                "disable sequence is missing {:?}",
+                std::str::from_utf8(mode).unwrap()
+            );
+        }
     }
 }
