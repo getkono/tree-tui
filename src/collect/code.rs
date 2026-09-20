@@ -21,6 +21,12 @@ pub fn collect_code(root: &Path) -> (HashMap<PathBuf, CodeData>, bool) {
     // dot-entry the walk now shows as zero lines. Turning that off makes tokei
     // descend `.git` too, so it is excluded explicitly (these become negated
     // override globs inside tokei) — the same prune the walk does.
+    //
+    // One gap remains: tokei keeps its gitignore rules, so a *force-added*
+    // ignored file — the only thing the walk's index union contributes — has a
+    // node but no report, and renders as zero lines like any file tokei can't
+    // classify. Closing it would mean feeding tokei the tracked set as
+    // whitelist overrides.
     let ignored: &[&str] = &[".git", ".jj"];
     let config = Config {
         hidden: Some(true),
@@ -61,27 +67,70 @@ pub fn collect_code(root: &Path) -> (HashMap<PathBuf, CodeData>, bool) {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    /// The code lens must see the same files the walk does. tokei skips hidden
-    /// files by default, and turning that off makes it descend `.git` — this
-    /// pins both halves against this crate's own checkout. Inert in the
-    /// published tarball, which excludes `/.github`.
-    #[test]
-    fn dot_entries_are_counted_and_the_git_dir_is_not() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        if !root.join(".github/workflows/ci.yml").exists() {
-            return;
+    /// A scratch directory holding a fake `.git` whose contents tokei *would*
+    /// classify. A real `.git` is all loose objects and `.sample` files, none
+    /// of which tokei recognizes, so asserting against one proves nothing.
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "tree-tui-code-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create the temp root");
+            Self(dir)
         }
-        let (files, _) = super::collect_code(root);
 
+        fn write(&self, rel: &str, body: &str) {
+            let path = self.0.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("create a fixture dir");
+            }
+            std::fs::write(path, body).expect("write a fixture file");
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// tokei skips hidden files by default, which would report every dot-entry
+    /// the walk now shows as zero lines.
+    #[test]
+    fn dot_entries_are_counted() {
+        let root = TempRoot::new("dotfiles");
+        root.write(".github/workflows/ci.yml", "on: push\njobs:\n  a:\n");
+        root.write("src/main.rs", "fn main() {}\n");
+
+        let (files, _) = super::collect_code(&root.0);
         let ci = files
             .get(Path::new(".github/workflows/ci.yml"))
-            .expect("a tracked file under a dot-directory is counted");
+            .expect("a file under a dot-directory is counted");
         assert!(ci.num.code > 0, "and it has real line counts");
+    }
+
+    /// Turning tokei's hidden filter off makes it descend `.git`, where it
+    /// opens every extensionless file to sniff a shebang. The hook below is
+    /// exactly such a file, so this fails without the explicit exclusion.
+    #[test]
+    fn the_git_directory_is_not_counted() {
+        let root = TempRoot::new("gitdir");
+        root.write("src/main.rs", "fn main() {}\n");
+        root.write(".git/hooks/pre-commit", "#!/bin/sh\necho hi\nexit 0\n");
+        root.write(".git/config", "[core]\n\trepositoryformatversion = 0\n");
+
+        let (files, _) = super::collect_code(&root.0);
         assert!(
-            !files.keys().any(|p| p.starts_with(".git/")),
-            "tokei must not walk the git object store"
+            !files.keys().any(|p| p.starts_with(".git")),
+            "tokei must not walk the git directory: {:?}",
+            files.keys().collect::<Vec<_>>()
         );
     }
 }

@@ -4,9 +4,9 @@
 //! untracked file git wouldn't ignore. Concretely, the `ignore` crate's walk
 //! with hidden-filtering **off** (a dot-entry is an ordinary file — `.github/`
 //! and `.gitignore` are tracked like any other path), unioned with the git
-//! index so a tracked-but-gitignored file still gets a node. `.git`/`.jj` are
-//! pruned explicitly, because `ignore` excludes them only by way of the hidden
-//! filter this module turns off.
+//! index so a tracked-but-gitignored file still gets a node. VCS bookkeeping
+//! (`.git`, `.jj`, `.hg`, `.svn`) is pruned explicitly, because `ignore`
+//! excludes it only by way of the hidden filter this module turns off.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -25,7 +25,8 @@ pub struct WalkResult {
 
 /// Walk `root`, collecting files (with sizes) and directories.
 pub fn walk(root: &Path) -> WalkResult {
-    walk_with(root, &git::tracked_files(root), git::is_repo(root))
+    let (in_repo, tracked) = git::repo_files(root);
+    walk_with(root, &tracked, in_repo)
 }
 
 /// The walk proper, with the git-dependent inputs passed in so the union and
@@ -90,9 +91,12 @@ fn walk_with(root: &Path, tracked: &[PathBuf], in_repo: bool) -> WalkResult {
 /// staged for deletion. Sizing and the directory-symlink rule match the walk's
 /// own, so a file doesn't change shape depending on which of the two found it.
 fn union_tracked(root: &Path, files: &mut Vec<(PathBuf, u64)>, tracked: &[PathBuf]) {
-    let mut seen: HashSet<PathBuf> = files.iter().map(|(rel, _)| rel.clone()).collect();
+    if tracked.is_empty() {
+        return; // no repository, or nothing tracked: don't build the key set
+    }
+    let mut seen: HashSet<PathBuf> = files.iter().map(|(rel, _)| dedupe_key(rel)).collect();
     for rel in tracked {
-        if !seen.insert(rel.clone()) {
+        if !seen.insert(dedupe_key(rel)) {
             continue; // already walked, or a repeated conflict stage
         }
         let path = root.join(rel);
@@ -106,11 +110,33 @@ fn union_tracked(root: &Path, files: &mut Vec<(PathBuf, u64)>, tracked: &[PathBu
     }
 }
 
+/// The key a path is deduped under.
+///
+/// On a case-insensitive filesystem the index's spelling and the walk's can
+/// differ for one physical file — `Makefile` in the index, `makefile` on disk
+/// after a rename git doesn't notice — and the existence check resolves either.
+/// Folding the key keeps that from becoming two nodes whose bytes are counted
+/// twice in every ancestor. Case-sensitive filesystems must *not* fold: there,
+/// `Foo` and `foo` really are two files.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn dedupe_key(rel: &Path) -> PathBuf {
+    PathBuf::from(rel.to_string_lossy().to_lowercase())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn dedupe_key(rel: &Path) -> PathBuf {
+    rel.to_path_buf()
+}
+
 /// Whether an entry is VCS bookkeeping to prune — the directory, or the `.git`
 /// *file* a linked worktree or submodule has in its place. `ignore` drops these
-/// only via the hidden filter, which this module disables.
+/// only via the hidden filter, which this module disables. Outside a repository
+/// there is no `.gitignore` to fall back on, so the other VCSs are named too.
 fn is_vcs_dir(entry: &DirEntry) -> bool {
-    matches!(entry.file_name().to_str(), Some(".git" | ".jj"))
+    matches!(
+        entry.file_name().to_str(),
+        Some(".git" | ".jj" | ".hg" | ".svn")
+    )
 }
 
 /// Whether `path` is a symlink resolving to a directory (a broken link is not).
@@ -308,8 +334,91 @@ mod tests {
         );
     }
 
-    /// The one test that exercises `git::tracked_files` against a real index:
-    /// this crate's own checkout, which tracks dot-entries. Inert when built
+    /// Build a scratch repository with `git`, returning false if the binary
+    /// isn't available so the test skips rather than fails.
+    fn git_init(root: &Path, args: &[&[&str]]) -> bool {
+        for a in args {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(*a)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// The union against a *real* index. Without this, stubbing
+    /// `git::repo_files` to return nothing leaves every other test green:
+    /// this crate tracks no ignored path, so the union contributes nothing to
+    /// a walk of its own checkout.
+    #[test]
+    fn a_force_added_ignored_file_comes_back_from_the_index() {
+        let root = TempRoot::new("real-index");
+        root.write(".gitignore", "vendor/\n");
+        root.write("vendor/lib.rs", "fn f() {}\n");
+        root.write("src/main.rs", "fn main() {}\n");
+        if !git_init(
+            &root.0,
+            &[
+                &["init", "-q"],
+                &["add", "src/main.rs", ".gitignore"],
+                &["add", "-f", "vendor/lib.rs"],
+            ],
+        ) {
+            return; // no usable `git`: skip rather than fail
+        }
+
+        let (in_repo, tracked) = git::repo_files(&root.0);
+        assert!(in_repo, "the fixture is a repository");
+        assert!(
+            tracked.contains(&PathBuf::from("vendor/lib.rs")),
+            "the index must report the force-added path: {tracked:?}"
+        );
+
+        let mut walked: Vec<String> = walk(&root.0)
+            .files
+            .iter()
+            .map(|(rel, _)| rel.to_string_lossy().replace('\\', "/"))
+            .collect();
+        walked.sort();
+        assert_eq!(
+            walked,
+            vec![".gitignore", "src/main.rs", "vendor/lib.rs"],
+            "tracked-but-ignored appears exactly once, and .git never does"
+        );
+    }
+
+    /// Scanning a subdirectory of a repository must strip the prefix, not bail.
+    #[test]
+    fn a_subdirectory_scan_root_still_resolves_tracked_paths() {
+        let root = TempRoot::new("subdir-root");
+        root.write(".gitignore", "crate/vendor/\n");
+        root.write("crate/vendor/lib.rs", "fn f() {}\n");
+        root.write("crate/src/main.rs", "fn main() {}\n");
+        if !git_init(
+            &root.0,
+            &[&["init", "-q"], &["add", "-f", "crate/vendor/lib.rs"]],
+        ) {
+            return;
+        }
+
+        let (_, tracked) = git::repo_files(&root.0.join("crate"));
+        assert!(
+            tracked.contains(&PathBuf::from("vendor/lib.rs")),
+            "paths are relative to the scan root, not the repo root: {tracked:?}"
+        );
+    }
+
+    /// This crate's own checkout, which tracks dot-entries. Inert when built
     /// outside a repository (the published tarball has no `.git`).
     #[test]
     fn this_repository_shows_its_tracked_dot_entries() {
