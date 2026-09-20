@@ -453,6 +453,62 @@ mod tests {
         );
     }
 
+    /// Everything the retired detail panel used to say about the selected node
+    /// now rides in the row itself: its file count, its on-disk size, and its
+    /// share of the tree under the active lens.
+    #[test]
+    fn wide_rows_carry_the_files_size_and_share_columns() {
+        let mut app = sample_app();
+        let mut terminal = Terminal::new(TestBackend::new(180, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+
+        for header in ["files", "size", "share", "languages", "lines"] {
+            assert!(view.contains(header), "missing {header} column:\n{view}");
+        }
+
+        // The values, not just the headers. src aggregates 2 files and 6000
+        // bytes and holds 180 of the 200 lines counted; README.md is 1 file of
+        // 800 bytes and the other 20 lines.
+        let row = |needle: &str| {
+            view.lines()
+                .find(|line| line.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle} row:\n{view}"))
+                .to_string()
+        };
+        let src = row("src/");
+        assert!(src.contains("5.9 KB"), "src size:\n{src}");
+        assert!(src.contains(" 2 "), "src file count:\n{src}");
+        assert!(src.contains("90.0%"), "src share:\n{src}");
+        let readme = row("README.md");
+        assert!(readme.contains("800 B"), "README size:\n{readme}");
+        assert!(readme.contains(" 1 "), "README file count:\n{readme}");
+        assert!(readme.contains("10.0%"), "README share:\n{readme}");
+    }
+
+    /// `share` measures against the *root's* total, not the parent's, so the
+    /// column always reads against the figure in the header.
+    #[test]
+    fn share_is_measured_against_the_root_not_the_parent() {
+        use crate::action::Action;
+        let mut app = sample_app();
+        app.update(Action::ExpandAll);
+        let mut terminal = Terminal::new(TestBackend::new(180, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+
+        // main.rs is 120 lines: 60.0% of the root's 200, but 66.7% of src's 180.
+        let row = view
+            .lines()
+            .find(|line| line.contains("main.rs"))
+            .unwrap_or_else(|| panic!("no main.rs row:\n{view}"));
+        assert!(row.contains("60.0%"), "not the root's total:\n{row}");
+        assert!(
+            !row.contains("66.7%"),
+            "measured against the parent:\n{row}"
+        );
+    }
+
     #[test]
     fn renders_detail_panel_and_help_overlay() {
         let mut app = sample_app();

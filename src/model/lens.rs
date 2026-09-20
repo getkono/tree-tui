@@ -58,60 +58,98 @@ pub enum Tint {
     Plain,
 }
 
+/// How a column renders its key's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnFormat {
+    /// The value itself: a thousands-grouped count, or human bytes for a byte
+    /// key.
+    Value,
+    /// The value as a percentage of the root's total for the same key.
+    Share,
+}
+
+/// How hard a column fights for width.
+///
+/// `Core` columns are the lens's own breakdown — the reason you opened it.
+/// `Extra` columns are the universals every lens carries (`files`, `size`,
+/// `share`) plus per-lens extras that are context rather than headline; they
+/// yield to the code lens's language legend before the legend yields to them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rank {
+    Core,
+    Extra,
+}
+
 /// One numeric column in the tree table (right-aligned).
 #[derive(Debug, Clone, Copy)]
 pub struct ColumnSpec {
     pub header: &'static str,
     pub key: SubKey,
     pub tint: Tint,
+    pub format: ColumnFormat,
+    pub rank: Rank,
 }
 
+/// The universals every lens ends with: the file count and on-disk size of the
+/// row, then its share of the whole tree under that lens's primary key. They
+/// are what the row would otherwise only say in a side panel, and they are the
+/// first columns to go when the terminal narrows.
+const fn extra(header: &'static str, key: SubKey, tint: Tint, format: ColumnFormat) -> ColumnSpec {
+    ColumnSpec {
+        header,
+        key,
+        tint,
+        format,
+        rank: Rank::Extra,
+    }
+}
+
+const fn core(header: &'static str, key: SubKey, tint: Tint) -> ColumnSpec {
+    ColumnSpec {
+        header,
+        key,
+        tint,
+        format: ColumnFormat::Value,
+        rank: Rank::Core,
+    }
+}
+
+const FILES_COL: ColumnSpec = extra("files", SubKey::Files, Tint::Plain, ColumnFormat::Value);
+const SIZE_COL: ColumnSpec = extra("size", SubKey::Bytes, Tint::Size, ColumnFormat::Value);
+
+/// The `share` column for a lens, as a percentage of the root's total under
+/// `key` — the lens's own primary key, so `share` always answers "how much of
+/// the number in the header is this row?".
+const fn share(key: SubKey) -> ColumnSpec {
+    extra("share", key, Tint::Plain, ColumnFormat::Share)
+}
+
+// Core columns first, then the extras — `Columns::choose` drops from the right,
+// so the supplementary numbers go before a lens loses its own breakdown.
 const CODE_COLS: &[ColumnSpec] = &[
-    ColumnSpec {
-        header: "code",
-        key: SubKey::Code,
-        tint: Tint::Code,
-    },
-    ColumnSpec {
-        header: "comments",
-        key: SubKey::Comments,
-        tint: Tint::Comments,
-    },
-    ColumnSpec {
-        header: "blanks",
-        key: SubKey::Blanks,
-        tint: Tint::Blanks,
-    },
+    core("code", SubKey::Code, Tint::Code),
+    core("comments", SubKey::Comments, Tint::Comments),
+    core("blanks", SubKey::Blanks, Tint::Blanks),
+    FILES_COL,
+    SIZE_COL,
+    share(SubKey::Lines),
 ];
-const SIZE_COLS: &[ColumnSpec] = &[];
+const SIZE_COLS: &[ColumnSpec] = &[FILES_COL, share(SubKey::Bytes)];
 const CHURN_COLS: &[ColumnSpec] = &[
-    ColumnSpec {
-        header: "added",
-        key: SubKey::Added,
-        tint: Tint::Add,
-    },
-    ColumnSpec {
-        header: "deleted",
-        key: SubKey::Deleted,
-        tint: Tint::Del,
-    },
+    core("added", SubKey::Added, Tint::Add),
+    core("deleted", SubKey::Deleted, Tint::Del),
+    extra("commits", SubKey::Commits, Tint::Plain, ColumnFormat::Value),
+    FILES_COL,
+    SIZE_COL,
+    share(SubKey::Churn),
 ];
 const STATUS_COLS: &[ColumnSpec] = &[
-    ColumnSpec {
-        header: "added",
-        key: SubKey::StatusAdded,
-        tint: Tint::Add,
-    },
-    ColumnSpec {
-        header: "modified",
-        key: SubKey::StatusModified,
-        tint: Tint::Status,
-    },
-    ColumnSpec {
-        header: "deleted",
-        key: SubKey::StatusDeleted,
-        tint: Tint::Del,
-    },
+    core("added", SubKey::StatusAdded, Tint::Add),
+    core("modified", SubKey::StatusModified, Tint::Status),
+    core("deleted", SubKey::StatusDeleted, Tint::Del),
+    FILES_COL,
+    SIZE_COL,
+    share(SubKey::StatusTotal),
 ];
 
 const CODE_KEYS: &[SubKey] = &[
@@ -207,26 +245,10 @@ impl Lens {
     /// per-row bar and the declutter zero-test.
     pub fn primary(self) -> ColumnSpec {
         match self {
-            Lens::Code => ColumnSpec {
-                header: "lines",
-                key: SubKey::Lines,
-                tint: Tint::Plain,
-            },
-            Lens::Size => ColumnSpec {
-                header: "size",
-                key: SubKey::Bytes,
-                tint: Tint::Size,
-            },
-            Lens::Churn => ColumnSpec {
-                header: "churn",
-                key: SubKey::Churn,
-                tint: Tint::Plain,
-            },
-            Lens::Status => ColumnSpec {
-                header: "changes",
-                key: SubKey::StatusTotal,
-                tint: Tint::Plain,
-            },
+            Lens::Code => core("lines", SubKey::Lines, Tint::Plain),
+            Lens::Size => core("size", SubKey::Bytes, Tint::Size),
+            Lens::Churn => core("churn", SubKey::Churn, Tint::Plain),
+            Lens::Status => core("changes", SubKey::StatusTotal, Tint::Plain),
         }
     }
 }

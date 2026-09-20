@@ -20,10 +20,12 @@ use unicode_width::UnicodeWidthStr;
 
 use super::theme;
 use crate::app::{Focus, Loaded, RowCache};
-use crate::model::{CodeNum, ColumnSpec, Lens, NodeId, NodeKind, SubKey, TreeNode};
+use crate::model::{
+    CodeNum, ColumnFormat, ColumnSpec, Lens, NodeId, NodeKind, Rank, SubKey, TreeNode,
+};
 
 /// Width of every numeric column (fits `comments`, `modified`, and grouped
-/// counts or `123.4 MB`).
+/// counts, `123.4 MB`, or `100.0%`).
 const COL_W: usize = 9;
 /// Smallest worthwhile languages column (also the `languages` header width).
 const LANG_MIN: usize = 9;
@@ -59,10 +61,31 @@ impl Columns {
             cols.pop();
         }
 
-        // Size the legend from whatever budget remains (code lens only).
-        let budget = inner.saturating_sub(column_run(cols.len(), legend_on));
-        let name_reserve = name_needed.clamp(NAME_FLOOR, NAME_MAX).min(budget);
-        let avail = budget.saturating_sub(name_reserve).min(LANG_MAX);
+        // Legend width from whatever budget remains (code lens only).
+        let legend_from = |cols: usize| {
+            let budget = inner.saturating_sub(column_run(cols, legend_on));
+            let name_reserve = name_needed.clamp(NAME_FLOOR, NAME_MAX).min(budget);
+            budget.saturating_sub(name_reserve).min(LANG_MAX)
+        };
+
+        // A code-lens row without its language breakdown has lost the reason
+        // the lens exists, so the legend outranks the supplementary `Extra`
+        // columns: give up those, rightmost first, to buy it a usable width.
+        // The lens's own `Core` breakdown is never traded away for it.
+        //
+        // Only when the trade can actually be won, though: on a pane too narrow
+        // for the legend even with every extra gone, yielding would spend the
+        // columns and still show no languages.
+        let core = cols.iter().filter(|col| col.rank == Rank::Core).count();
+        if legend_on && desired_legend > 0 && legend_from(core) >= LANG_MIN {
+            while legend_from(cols.len()) < LANG_MIN
+                && matches!(cols.last(), Some(col) if col.rank == Rank::Extra)
+            {
+                cols.pop();
+            }
+        }
+
+        let avail = legend_from(cols.len());
         let lang_width = if legend_on && desired_legend > 0 && avail >= LANG_MIN {
             desired_legend.max(LANG_MIN).min(avail)
         } else {
@@ -245,7 +268,24 @@ fn num_cell(
     let text = if computing {
         "…".to_string()
     } else {
-        theme::format_value(col.key, loaded.effective_value(col.key, id))
+        match col.format {
+            ColumnFormat::Value => {
+                theme::format_value(col.key, loaded.effective_value(col.key, id))
+            }
+            // Measured against the root's total for the same key, so the
+            // column reads directly against the figure in the header.
+            //
+            // An excluded row has no share of that total: it was subtracted
+            // from the denominator, while `effective_value` still reports its
+            // own full value — a ratio between two different bases, which runs
+            // past 100% the moment anything sizeable is excluded. It has no
+            // honest number to show, so it shows none.
+            ColumnFormat::Share if loaded.is_excluded(id) => "—".to_string(),
+            ColumnFormat::Share => theme::percent(
+                loaded.effective_value(col.key, id) as usize,
+                loaded.effective_value(col.key, loaded.tree.root) as usize,
+            ),
+        }
     };
     let mut style = Style::default();
     if let Some(color) = theme::tint_color(col.tint) {
@@ -472,10 +512,69 @@ mod tests {
     }
 
     #[test]
-    fn size_lens_has_no_optional_columns_or_legend() {
+    fn size_lens_carries_only_the_universals_and_no_legend() {
         let columns = Columns::choose(96, 11, 0, Lens::Size);
-        assert!(columns.cols.is_empty());
+        assert_eq!(
+            columns.cols.iter().map(|c| c.header).collect::<Vec<_>>(),
+            ["files", "share"]
+        );
+        assert!(columns.cols.iter().all(|c| c.rank == Rank::Extra));
         assert_eq!(columns.lang_width, 0);
         assert_eq!(columns.primary.key, SubKey::Bytes);
+    }
+
+    /// A long name squeezes the legend below its floor. The supplementary
+    /// columns give way for it, rightmost first, and stop at the lens's own
+    /// breakdown — a code row without `code` / `comments` / `blanks` would have
+    /// lost more than it gained.
+    #[test]
+    fn extra_columns_yield_to_the_legend_but_core_columns_do_not() {
+        let full = Columns::choose(110, 11, 30, Lens::Code);
+        assert_eq!(full.cols.len(), Lens::Code.columns().len());
+        assert!(full.lang_width >= LANG_MIN);
+
+        // A long name leaves the legend under its floor, so extras yield — but
+        // only as many as it takes, and never a `Core` one.
+        let squeezed = Columns::choose(110, 44, 30, Lens::Code);
+        assert!(squeezed.lang_width >= LANG_MIN, "legend was squeezed out");
+        assert!(squeezed.cols.len() < full.cols.len(), "nothing yielded");
+        assert!(
+            full.cols[squeezed.cols.len()..]
+                .iter()
+                .all(|c| c.rank == Rank::Extra),
+            "a core column was traded away: {:?}",
+            squeezed.cols.iter().map(|c| c.header).collect::<Vec<_>>()
+        );
+
+        // Narrower still: every extra goes, and the yielding stops at `Core`.
+        let floor = Columns::choose(95, 44, 30, Lens::Code);
+        assert_eq!(
+            floor.cols.iter().map(|c| c.header).collect::<Vec<_>>(),
+            ["code", "comments", "blanks"]
+        );
+        assert!(floor.lang_width >= LANG_MIN);
+    }
+
+    /// Yielding is a trade, so it only happens when it can be won: on a pane
+    /// too narrow for the legend even with every extra gone, the columns stay
+    /// rather than being spent for a legend that still cannot be shown.
+    #[test]
+    fn extras_are_kept_when_yielding_them_would_not_buy_a_legend() {
+        let columns = Columns::choose(92, 44, 30, Lens::Code);
+        assert_eq!(
+            columns.cols.len(),
+            Lens::Code.columns().len(),
+            "columns were spent for nothing"
+        );
+        assert_eq!(columns.lang_width, 0, "the legend could not fit anyway");
+    }
+
+    /// The legend never costs a lens its breakdown: with no legend wanted at
+    /// all, the extras stay put however long the name is.
+    #[test]
+    fn a_lens_without_a_legend_keeps_its_extra_columns() {
+        let columns = Columns::choose(110, 44, 0, Lens::Churn);
+        assert_eq!(columns.cols.len(), Lens::Churn.columns().len());
+        assert!(columns.cols.iter().any(|c| c.header == "commits"));
     }
 }
