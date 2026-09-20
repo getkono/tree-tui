@@ -22,12 +22,16 @@ use crate::app::{App, Focus, Mode, PaneRects, Screen};
 /// folds away so the tree keeps the room.
 const PREVIEW_MIN_WIDTH: u16 = 100;
 const PREVIEW_MIN_HEIGHT: u16 = 20;
-/// Denominator of the tree/preview split. Thousandths rather than percent so a
-/// dragged divider can still land on any column of a wide terminal: at one part
-/// in 100, a 400-column body only resolves to every 4th column.
-pub const SPLIT_SCALE: u16 = 1000;
+/// Denominator of the tree/preview split.
+///
+/// Finer than the width it divides — no terminal has ten thousand columns — so
+/// every column of the body is addressable and a width recorded by a drag comes
+/// back as that same width. At one part in 100 a 400-column body would only
+/// resolve to every 4th column, and at one part in 1000 the round trip starts
+/// losing a column once the body passes 1000.
+pub const SPLIT_SCALE: u16 = 10_000;
 /// Share of the body width the preview pane takes before the divider is dragged.
-pub const DEFAULT_SPLIT_SHARE: u16 = SPLIT_SCALE * 2 / 5; // 40%
+pub const DEFAULT_SPLIT_SHARE: u16 = SPLIT_SCALE / 5 * 2; // 40%
 /// Narrowest either body pane may be left by a divider drag: two borders, the
 /// selection gutter, and `NAME_FLOOR`-ish of content — enough that a tree row
 /// still reads as a name and the preview still fits a short line. The drag
@@ -595,10 +599,11 @@ mod tests {
 
     /// The drag records a width as a share; rendering turns it back into a
     /// width. The round trip has to be exact, or the seam drifts from the
-    /// pointer — and drifts further the wider the terminal.
+    /// pointer — and drifts further the wider the terminal, which is why the
+    /// widths here run past any real one.
     #[test]
     fn a_width_survives_the_round_trip_through_a_share() {
-        for body in [100u16, 120, 160, 240, 400] {
+        for body in [48u16, 100, 120, 160, 240, 400, 1000, 1001, 1600] {
             for width in PANE_MIN..=(body - PANE_MIN) {
                 let back = preview_width(body, width_to_share(body, width));
                 assert_eq!(back, width, "width {width} of {body} did not survive");
