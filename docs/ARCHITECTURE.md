@@ -25,6 +25,14 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
   **collector** on a blocking thread; the result comes back over an `mpsc` channel, is **aggregated**
   bottom-up into a per-node `Layer`, and cached for the session.
 
+## Crate layout
+
+The crate is a library (`src/lib.rs`) plus a thin binary (`src/main.rs`, the `tree` executable,
+which only wraps `run_cli` in `#[tokio::main]`). The split exists so `benches/` can link against
+the walk; a binary-only crate has no target to link to. Only `collect` and `model` are `pub` —
+everything else is a private module, and the library is an internal detail of the binary with no
+API-stability promise.
+
 ## Shared core vs modular tools
 
 **Shared core (metric-agnostic):**
