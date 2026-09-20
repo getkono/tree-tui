@@ -30,7 +30,7 @@ pub enum Action {
     CollapseAll,
     CycleSort,
     ReverseSort,
-    /// Toggle the side-by-side preview pane.
+    /// Toggle the side-by-side preview pane (`p` or Tab).
     TogglePreview,
     /// Switch to the next available lens.
     CycleLens,
@@ -73,7 +73,7 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('C') => Action::CollapseAll,
         KeyCode::Char('s') => Action::CycleSort,
         KeyCode::Char('r') => Action::ReverseSort,
-        KeyCode::Char('p') => Action::TogglePreview,
+        KeyCode::Char('p') | KeyCode::Tab => Action::TogglePreview,
         KeyCode::Char('m') => Action::CycleLens,
         KeyCode::Char(c @ '1'..='9') => Action::JumpLens(c as u8 - b'0'),
         KeyCode::Char('z') => Action::ToggleZeros,

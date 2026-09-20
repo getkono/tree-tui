@@ -114,6 +114,7 @@ characters. Set `TREE_TUI_ICONS` to make the choice stick.
 | `s` | cycle the sort column (within the lens) |
 | `r` | reverse the sort order |
 | `z` | hide rows that are zero under the active lens |
+| `p` / `Tab` | toggle the preview pane |
 | `/` | filter by name (`Esc` clears) |
 | `?` | toggle help |
 | `q` / `Ctrl-c` | quit |

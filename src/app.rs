@@ -1955,6 +1955,31 @@ mod tests {
         assert_eq!(selected_index(&app), before + 1);
     }
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn show_preview(app: &App) -> bool {
+        let Screen::Loaded(loaded) = &app.screen else {
+            panic!("not loaded")
+        };
+        loaded.show_preview
+    }
+
+    #[test]
+    fn tab_toggles_the_preview_pane_and_d_is_unbound() {
+        let mut app = sample_app();
+        assert!(show_preview(&app));
+        app.handle_key(key(KeyCode::Tab));
+        assert!(!show_preview(&app));
+        app.handle_key(key(KeyCode::Tab));
+        assert!(show_preview(&app));
+
+        // `d` used to toggle the retired detail panel; it now maps to nothing
+        // at all, rather than merely to something other than the preview.
+        assert_eq!(action::map_key(key(KeyCode::Char('d'))), Action::None);
+    }
+
     #[test]
     fn cycle_focus_requires_a_visible_preview() {
         let mut app = sample_app();
