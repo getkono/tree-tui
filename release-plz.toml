@@ -10,5 +10,8 @@ changelog_update = true
 # Cut a GitHub Release (with generated notes) and a `v{version}` git tag per release.
 git_release_enable = true
 git_tag_enable = true
-# Binary crate with no public library API, so cargo-semver-checks would only add noise.
+# The library half of the crate exists to give the tests and benchmarks
+# something to link against (see docs/ARCHITECTURE.md); its surface is an
+# internal detail of the `tree` binary and is documented as carrying no
+# stability promise, so cargo-semver-checks would only add noise.
 semver_check = false

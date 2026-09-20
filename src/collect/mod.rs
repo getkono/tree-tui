@@ -8,7 +8,7 @@
 
 mod code;
 mod git;
-pub mod walk;
+mod walk;
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -17,11 +17,14 @@ use crate::model::{ChurnData, CodeData, Lens, StatusData};
 
 pub use git::{head_short_hash, is_repo};
 pub use walk::{WalkResult, walk};
-// The tracked-file set the walk unions in. Exposed only so `benches/walk.rs`
-// can resolve it *outside* the measured region — the benchmark times the
-// traversal, not gix's index read.
+// For `benches/walk.rs`, which is a separate crate and so cannot reach anything
+// private. `repo_files` lets it resolve the tracked set *outside* the measured
+// region, so the benchmark times the traversal and not gix's index read; the
+// other two are the traversals it compares.
 #[doc(hidden)]
 pub use git::repo_files;
+#[doc(hidden)]
+pub use walk::{walk_with, walk_with_sequential};
 
 /// The per-file data produced by computing one lens, tagged by which lens it is
 /// for. Aggregated into a [`Layer`](crate::model::Layer) by the app.
