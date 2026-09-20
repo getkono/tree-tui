@@ -83,13 +83,6 @@ pub struct Tree {
     pub index: std::collections::HashMap<PathBuf, NodeId>,
 }
 
-impl Tree {
-    /// Total on-disk size (the root's aggregated bytes).
-    pub fn total_bytes(&self) -> u64 {
-        self.nodes[self.root].bytes
-    }
-}
-
 /// A lazily-computed, cached per-lens metric layer, indexed by [`NodeId`].
 ///
 /// `Ready` holds one value per node, already aggregated bottom-up. A layer stays

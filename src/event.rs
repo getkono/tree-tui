@@ -219,7 +219,9 @@ fn apply_event(
             true
         }
         // Wheel scrolls and a left click act on the pane under the cursor; one
-        // step per event. Motion is not tracked, so nothing floods the loop.
+        // step per event. Only *held* motion is tracked (mode 1002), so an idle
+        // pointer never reaches the loop at all — a drag only arrives once the
+        // button is already down.
         Event::Mouse(m) => match m.kind {
             MouseEventKind::ScrollDown => {
                 app.handle_scroll(m.column, m.row, 1);
@@ -233,6 +235,17 @@ fn apply_event(
                 app.handle_click(m.column, m.row);
                 true
             }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let moved = app.handle_drag(m.column);
+                // Moving the split moves the preview's rect, and a graphics
+                // placement lives outside the cell buffer — so a dragged resize
+                // has to forget it, exactly as `Event::Resize` does below.
+                if moved {
+                    kitty.forget();
+                }
+                moved
+            }
+            MouseEventKind::Up(MouseButton::Left) => app.end_drag(),
             _ => false,
         },
         Event::Resize(_, _) => {

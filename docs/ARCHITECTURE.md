@@ -36,7 +36,10 @@ walk (ignore)  ──►  build_skeleton  ──►  Tree (skeleton + bytes + fi
 - `app` — state, the reducer, the lazy-compute request/cache wiring, and `Loaded::value` (the one
   place that maps a `SubKey` to the node field or layer it reads).
 - `event` — the `tokio::select!` loop: input, walk completion, lens results, spinner ticks.
-- `ui` — the render scaffold (header / tree table / detail / footer / help) driven by the active lens.
+- `ui` — the render scaffold (header / tree table / preview / footer / help) driven by the active
+  lens. The tree/preview split is state (`Loaded::split_share`, in thousandths of the body width),
+  not a constant: the seam between the panes is a two-column drag handle, which is why `tui` enables
+  xterm mouse mode 1002 (motion while a button is held) but still not 1003 (all motion).
 
 File viewing is not part of the metric core. The inline **preview** pane (`ui::preview`) and the
 full-screen **reader** (`ui::reader`) both render through **`ui::fileview`**, which composes the
@@ -96,11 +99,14 @@ checklist. (The genuine plug-in seam is the **collectors**, which are independen
 
 1. Add a variant to `Lens` in `model::lens` and to `Lens::ALL`.
 2. Fill the `match` arms the compiler now flags: `label`, `sub_keys`, `has_layer`, `is_available`,
-   `columns`, `primary` (and `SubKey::label` for any new sub-keys).
+   `columns`, `primary` (and `SubKey::label` for any new sub-keys). A lens's `columns` list runs
+   `Rank::Core` first (its own breakdown) then `Rank::Extra`; end it with `FILES_COL`, `SIZE_COL`,
+   and `share(<the lens's primary key>)` so every lens carries the universals. Columns drop from
+   the right as the pane narrows, and `Extra` ones also yield to the code lens's language legend.
 3. If it needs new data: add fields to a per-node data struct (or a new one) in `model::node`, map
    the new `SubKey`s in `Loaded::value` (`app`), and add a collector (below). Add a `LayerResult`
    variant + `Loaded::apply_layer` arm + `Layer` field on `Loaded`.
-4. Add a detail-panel section in `ui::detail` and any colors in `ui::theme` (`Tint` → color).
+4. Add any colors the new columns need in `ui::theme` (`Tint` → color).
 5. Add tests (the model layer is pure): `value_of` mapping, sorting, aggregation.
 
 ## How to add a collector
