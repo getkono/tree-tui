@@ -605,8 +605,10 @@ mod tests {
 
     /// The `Drop`-time flush, exercised directly.
     ///
-    /// [`a_wide_tree_fans_out_and_merges_every_worker`] reaches this merge only
-    /// when the scheduler happens to fan the walk out: `ignore` hands work out
+    /// [`a_wide_tree_fans_out_and_merges_every_worker`] reaches this merge with
+    /// more than one flush in it only when the scheduler happens to fan the
+    /// walk out — the flush itself runs on every walk, but a merge of one
+    /// worker's findings merges nothing. `ignore` hands work out
     /// one directory at a time and stealing is lazy, so on a contended machine
     /// one worker drains the queue and the merge never sees a second flush.
     /// Building the visitors by hand pins the same invariant with no scheduling
@@ -644,28 +646,34 @@ mod tests {
         });
 
         let Findings {
-            files,
-            dirs,
+            mut files,
+            mut dirs,
             workers,
         } = merged.into_inner().expect("the merge lock is not poisoned");
+
+        // Sorted rather than set-compared: the merge appends, so a flush that
+        // ran twice has to be visible here and a set would swallow it. The
+        // walk leaves order unspecified, hence the sort.
+        files.sort();
+        dirs.sort();
 
         assert_eq!(
             workers, WORKERS as usize,
             "an empty flush was counted as a contributing worker"
         );
         assert_eq!(
-            files.into_iter().collect::<HashSet<_>>(),
+            files,
             (0..WORKERS)
                 .map(|w| (PathBuf::from(format!("f{w}")), w))
-                .collect::<HashSet<_>>(),
-            "a worker's files went missing in the merge"
+                .collect::<Vec<_>>(),
+            "a worker's files went missing in the merge, or arrived twice"
         );
         assert_eq!(
-            dirs.into_iter().collect::<HashSet<_>>(),
+            dirs,
             (0..WORKERS)
                 .map(|w| PathBuf::from(format!("d{w}")))
-                .collect::<HashSet<_>>(),
-            "a worker's directories went missing in the merge"
+                .collect::<Vec<_>>(),
+            "a worker's directories went missing in the merge, or arrived twice"
         );
     }
 
@@ -730,7 +738,7 @@ mod tests {
         if cores > 1 {
             assert!(
                 fanned_out > 0,
-                "none of {RUNS} runs used more than one worker on {cores} cores, \
+                "on {cores} cores, none of {RUNS} runs had a second worker contribute, \
                  so the walk never fanned out at all"
             );
         }
