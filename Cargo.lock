@@ -2761,9 +2761,9 @@ dependencies = [
 
 [[package]]
 name = "karet-filetype"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4afcb49968f0d210ae9140f2359630323b4b084024ba383b272f9559964b3d4c"
+checksum = "04834167bcb832f83a81768f4a0cd65a22b39ab3f1b59cde48a43bbe35492069"
 
 [[package]]
 name = "karet-fileview"
