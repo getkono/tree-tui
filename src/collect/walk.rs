@@ -678,8 +678,14 @@ mod tests {
     /// the property differential comparing an effectively single-threaded
     /// parallel walk against the sequential one. 64 sibling directories give
     /// the workers something to steal, and the contributor count asserts they
-    /// took it — so this is where the `Drop`-time merge is genuinely under
-    /// test: a flush that lost a worker's findings shows up as a short count.
+    /// took it.
+    ///
+    /// That count is an observation about the scheduler rather than about this
+    /// crate, so it holds across the runs instead of on each one: a contended
+    /// machine can let a single worker drain the queue before its siblings are
+    /// scheduled in, and asserting per run turns that into a failing build. The
+    /// merge itself is pinned with no scheduling in the way by
+    /// [`every_visitor_flushes_its_findings_into_the_merge`].
     ///
     /// Repeating it also pins the stability `App::same_skeleton` depends on —
     /// a set that wobbled between walks would rebuild the arena and drop all
@@ -689,6 +695,7 @@ mod tests {
     fn a_wide_tree_fans_out_and_merges_every_worker() {
         const DIRS: usize = 64;
         const PER_DIR: usize = 8;
+        const RUNS: usize = 20;
 
         let root = TempRoot::new("wide");
         for d in 0..DIRS {
@@ -702,7 +709,9 @@ mod tests {
         // runs one worker. The counts still hold; only the fan-out claim lapses.
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
 
-        for run in 0..20 {
+        let mut fanned_out = 0;
+
+        for run in 0..RUNS {
             let (result, workers) = walk_parallel(root.path(), &[], false);
             assert_eq!(
                 result.files.len(),
@@ -715,12 +724,15 @@ mod tests {
                 "run {run}: a directory went missing"
             );
             assert_eq!(normalized(&result), expected, "run {run} disagreed");
-            if cores > 1 {
-                assert!(
-                    workers >= 2,
-                    "run {run}: only {workers} worker contributed, so the merge was never exercised"
-                );
-            }
+            fanned_out += usize::from(workers >= 2);
+        }
+
+        if cores > 1 {
+            assert!(
+                fanned_out > 0,
+                "none of {RUNS} runs used more than one worker on {cores} cores, \
+                 so the walk never fanned out at all"
+            );
         }
     }
 
