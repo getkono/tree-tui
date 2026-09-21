@@ -603,6 +603,80 @@ mod tests {
         );
     }
 
+    /// The `Drop`-time flush, exercised directly.
+    ///
+    /// [`a_wide_tree_fans_out_and_merges_every_worker`] reaches this merge with
+    /// more than one flush in it only when the scheduler happens to fan the
+    /// walk out — the flush itself runs on every walk, but a merge of one
+    /// worker's findings merges nothing. `ignore` hands work out
+    /// one directory at a time and stealing is lazy, so on a contended machine
+    /// one worker drains the queue and the merge never sees a second flush.
+    /// Building the visitors by hand pins the same invariant with no scheduling
+    /// in the way — including on a single core, where the fan-out claim lapses
+    /// altogether. Truncating or dropping a worker's findings in `Drop` fails
+    /// this.
+    #[test]
+    fn every_visitor_flushes_its_findings_into_the_merge() {
+        const WORKERS: u64 = 4;
+
+        let root = Path::new("/nonexistent");
+        let merged = Mutex::new(Findings::default());
+
+        for w in 0..WORKERS {
+            let mut visitor = Visitor {
+                root,
+                local: Findings::default(),
+                merged: &merged,
+            };
+            visitor
+                .local
+                .files
+                .push((PathBuf::from(format!("f{w}")), w));
+            visitor.local.dirs.push(PathBuf::from(format!("d{w}")));
+            // `ignore` drops each visitor once its thread is done, and that
+            // flush is the thing under test.
+        }
+
+        // `ignore` also builds a transient visitor to seed the roots, which
+        // finds nothing. An empty flush is not a worker.
+        drop(Visitor {
+            root,
+            local: Findings::default(),
+            merged: &merged,
+        });
+
+        let Findings {
+            mut files,
+            mut dirs,
+            workers,
+        } = merged.into_inner().expect("the merge lock is not poisoned");
+
+        // Sorted rather than set-compared: the merge appends, so a flush that
+        // ran twice has to be visible here and a set would swallow it. The
+        // walk leaves order unspecified, hence the sort.
+        files.sort();
+        dirs.sort();
+
+        assert_eq!(
+            workers, WORKERS as usize,
+            "an empty flush was counted as a contributing worker"
+        );
+        assert_eq!(
+            files,
+            (0..WORKERS)
+                .map(|w| (PathBuf::from(format!("f{w}")), w))
+                .collect::<Vec<_>>(),
+            "a worker's files went missing in the merge, or arrived twice"
+        );
+        assert_eq!(
+            dirs,
+            (0..WORKERS)
+                .map(|w| PathBuf::from(format!("d{w}")))
+                .collect::<Vec<_>>(),
+            "a worker's directories went missing in the merge, or arrived twice"
+        );
+    }
+
     /// A tree wide enough that the traversal genuinely fans out, walked
     /// repeatedly.
     ///
@@ -612,8 +686,14 @@ mod tests {
     /// the property differential comparing an effectively single-threaded
     /// parallel walk against the sequential one. 64 sibling directories give
     /// the workers something to steal, and the contributor count asserts they
-    /// took it — so this is where the `Drop`-time merge is genuinely under
-    /// test: a flush that lost a worker's findings shows up as a short count.
+    /// took it.
+    ///
+    /// That count is an observation about the scheduler rather than about this
+    /// crate, so it holds across the runs instead of on each one: a contended
+    /// machine can let a single worker drain the queue before its siblings are
+    /// scheduled in, and asserting per run turns that into a failing build. The
+    /// merge itself is pinned with no scheduling in the way by
+    /// [`every_visitor_flushes_its_findings_into_the_merge`].
     ///
     /// Repeating it also pins the stability `App::same_skeleton` depends on —
     /// a set that wobbled between walks would rebuild the arena and drop all
@@ -623,6 +703,7 @@ mod tests {
     fn a_wide_tree_fans_out_and_merges_every_worker() {
         const DIRS: usize = 64;
         const PER_DIR: usize = 8;
+        const RUNS: usize = 20;
 
         let root = TempRoot::new("wide");
         for d in 0..DIRS {
@@ -636,7 +717,9 @@ mod tests {
         // runs one worker. The counts still hold; only the fan-out claim lapses.
         let cores = std::thread::available_parallelism().map_or(1, |n| n.get());
 
-        for run in 0..20 {
+        let mut fanned_out = 0;
+
+        for run in 0..RUNS {
             let (result, workers) = walk_parallel(root.path(), &[], false);
             assert_eq!(
                 result.files.len(),
@@ -649,12 +732,15 @@ mod tests {
                 "run {run}: a directory went missing"
             );
             assert_eq!(normalized(&result), expected, "run {run} disagreed");
-            if cores > 1 {
-                assert!(
-                    workers >= 2,
-                    "run {run}: only {workers} worker contributed, so the merge was never exercised"
-                );
-            }
+            fanned_out += usize::from(workers >= 2);
+        }
+
+        if cores > 1 {
+            assert!(
+                fanned_out > 0,
+                "on {cores} cores, none of {RUNS} runs had a second worker contribute, \
+                 so the walk never fanned out at all"
+            );
         }
     }
 
