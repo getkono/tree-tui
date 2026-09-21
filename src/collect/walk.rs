@@ -603,6 +603,72 @@ mod tests {
         );
     }
 
+    /// The `Drop`-time flush, exercised directly.
+    ///
+    /// [`a_wide_tree_fans_out_and_merges_every_worker`] reaches this merge only
+    /// when the scheduler happens to fan the walk out: `ignore` hands work out
+    /// one directory at a time and stealing is lazy, so on a contended machine
+    /// one worker drains the queue and the merge never sees a second flush.
+    /// Building the visitors by hand pins the same invariant with no scheduling
+    /// in the way — including on a single core, where the fan-out claim lapses
+    /// altogether. Truncating or dropping a worker's findings in `Drop` fails
+    /// this.
+    #[test]
+    fn every_visitor_flushes_its_findings_into_the_merge() {
+        const WORKERS: u64 = 4;
+
+        let root = Path::new("/nonexistent");
+        let merged = Mutex::new(Findings::default());
+
+        for w in 0..WORKERS {
+            let mut visitor = Visitor {
+                root,
+                local: Findings::default(),
+                merged: &merged,
+            };
+            visitor
+                .local
+                .files
+                .push((PathBuf::from(format!("f{w}")), w));
+            visitor.local.dirs.push(PathBuf::from(format!("d{w}")));
+            // `ignore` drops each visitor once its thread is done, and that
+            // flush is the thing under test.
+        }
+
+        // `ignore` also builds a transient visitor to seed the roots, which
+        // finds nothing. An empty flush is not a worker.
+        drop(Visitor {
+            root,
+            local: Findings::default(),
+            merged: &merged,
+        });
+
+        let Findings {
+            files,
+            dirs,
+            workers,
+        } = merged.into_inner().expect("the merge lock is not poisoned");
+
+        assert_eq!(
+            workers, WORKERS as usize,
+            "an empty flush was counted as a contributing worker"
+        );
+        assert_eq!(
+            files.into_iter().collect::<HashSet<_>>(),
+            (0..WORKERS)
+                .map(|w| (PathBuf::from(format!("f{w}")), w))
+                .collect::<HashSet<_>>(),
+            "a worker's files went missing in the merge"
+        );
+        assert_eq!(
+            dirs.into_iter().collect::<HashSet<_>>(),
+            (0..WORKERS)
+                .map(|w| PathBuf::from(format!("d{w}")))
+                .collect::<HashSet<_>>(),
+            "a worker's directories went missing in the merge"
+        );
+    }
+
     /// A tree wide enough that the traversal genuinely fans out, walked
     /// repeatedly.
     ///
