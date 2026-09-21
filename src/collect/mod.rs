@@ -1,7 +1,7 @@
 //! Modular data collectors and the lazy lens-computation entry point.
 //!
 //! Each collector is an independent data source keyed by relative path:
-//! [`walk`] (skeleton + size, run eagerly at startup) and [`code`] (tokei, run
+//! [`walk()`] (skeleton + size, run eagerly at startup) and `code` (tokei, run
 //! lazily). Git collectors arrive in a later phase. [`compute`] runs the
 //! collector for one lens on a background thread; the app aggregates the result
 //! into a cached [`Layer`](crate::model::Layer).
@@ -16,7 +16,15 @@ use std::path::{Component, Path, PathBuf};
 use crate::model::{ChurnData, CodeData, Lens, StatusData};
 
 pub use git::{head_short_hash, is_repo};
-pub use walk::walk;
+pub use walk::{WalkResult, walk};
+// For `benches/walk.rs`, which is a separate crate and so cannot reach anything
+// private. `repo_files` lets it resolve the tracked set *outside* the measured
+// region, so the benchmark times the traversal and not gix's index read; the
+// other two are the traversals it compares.
+#[doc(hidden)]
+pub use git::repo_files;
+#[doc(hidden)]
+pub use walk::{walk_with, walk_with_sequential};
 
 /// The per-file data produced by computing one lens, tagged by which lens it is
 /// for. Aggregated into a [`Layer`](crate::model::Layer) by the app.

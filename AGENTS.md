@@ -9,7 +9,8 @@ full design.
 - **ratatui** — TUI widget, layout, and rendering framework (the app's view layer).
 - **crossterm** — terminal backend: raw mode, input events, alternate screen.
 - **tokio** — async runtime for the input/event loop and concurrent I/O.
-- **ignore** — `.gitignore`-aware filesystem walk; builds the tree skeleton + per-file size.
+- **ignore** — `.gitignore`-aware filesystem walk (run in parallel); builds the tree skeleton
+  + per-file size.
 - **tokei** — code line counting (the `code` lens collector).
 - **gix** — pure-Rust git; the `churn`/`status` lens collectors.
 - **karet** — the toolkit behind the preview pane and the full-screen reader
@@ -40,7 +41,7 @@ for adding a lens or collector are in **`docs/ARCHITECTURE.md`**. Key modules:
   cache).
 
 Metrics are computed **lazily** (the first time a lens is opened, on a blocking thread) and **cached**
-for the session — only the cheap walk runs at startup.
+for the session — only the cheap walk runs at startup, and it traverses in parallel.
 
 ## Quality
 
@@ -64,6 +65,6 @@ so anything green locally is green in CI.
   panics. `ratatui::init()` already installs a terminal-restoring panic hook, so just call
   `color_eyre::install()` **first** and `ratatui::init()` after — ratatui chains the prior
   hook, so the terminal is restored before color-eyre prints its report. Pair every init with
-  `ratatui::restore()` on the way out (see `src/tui.rs`, `src/main.rs`).
+  `ratatui::restore()` on the way out (see `src/tui.rs`, `src/lib.rs`).
 - Use typed errors (`thiserror`) inside modules; use `color_eyre::Result` at the application
   boundary (`main`, top-level handlers).

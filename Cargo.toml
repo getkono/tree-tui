@@ -74,3 +74,24 @@ notify-debouncer-full = "0.7.0"
 lto = true
 strip = true
 codegen-units = 1
+
+[dev-dependencies]
+# `benches/walk.rs`: the sequential and parallel traversals, side by side.
+# Default features off — the HTML report pulls in a plotting stack this never
+# reads, and `cargo bench`'s own output is the evidence.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+# Property tests for the walk: the parallel and sequential traversals are
+# asserted equivalent over generated directory trees, which is the only
+# practical way to cover the interaction of nesting, dot-entries, ignore rules
+# and the tracked-file union. Default features off — the fork/timeout/regex
+# machinery isn't used, and skipping it keeps the dev tree to six crates.
+proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+
+# `harness = false` hands the target's `main` to criterion. `test = false` keeps
+# `cargo test` from running every benchmark once — which would write the
+# synthetic fixture to disk on every test run. CI still compiles this target,
+# via `mise run lint`'s `cargo clippy --all-targets`.
+[[bench]]
+name = "walk"
+harness = false
+test = false
