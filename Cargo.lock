@@ -2792,9 +2792,9 @@ dependencies = [
 
 [[package]]
 name = "karet-syntax"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c1d467e6a68ebdc72ded68977309abc6bbbd7a3c22a5636c898572eae33793"
+checksum = "29241158cf4bc1f3c4d39ae84975cafe7ea3ec56594d1bbd4278356397d44010"
 dependencies = [
  "karet-core",
  "karet-treesitter",
@@ -2828,9 +2828,9 @@ dependencies = [
 
 [[package]]
 name = "karet-treesitter"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08384d2aa645fb9389f5c100eba689d6d17f49159b28331233c2ecac5a16d37d"
+checksum = "6c73a4619031c5f91c0cc26e80e3d682349948b85aaf3afff2f66c80a40dcaae"
 dependencies = [
  "cc",
  "codebook-tree-sitter-latex",
