@@ -2767,9 +2767,9 @@ checksum = "04834167bcb832f83a81768f4a0cd65a22b39ab3f1b59cde48a43bbe35492069"
 
 [[package]]
 name = "karet-fileview"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a39d5ddc8c9ac80c8d5d2ba6c203479a99973d1a6f210982209b2e10d7592ff"
+checksum = "820127f59b751d0308697e53181aedf4e14198e7a8c48b21846676a8084a9f34"
 dependencies = [
  "base64",
  "gamut",
@@ -2816,9 +2816,9 @@ dependencies = [
 
 [[package]]
 name = "karet-theme"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fe89c3c0166fcfb36db54275ea14934a88e2c38f4225f1c935bc566fe984e9d"
+checksum = "9a5ee2c052a72e794d191875390e6b3436431d5d57131aae338b24457db41650"
 dependencies = [
  "karet-core",
  "palette",
