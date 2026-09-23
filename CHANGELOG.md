@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/getkono/tree-tui/compare/v0.2.1...v0.3.0) - 2026-09-21
+
+### Added
+
+- *(ui)* resize the tree and preview by dragging the divider
+- *(tui)* track mouse motion while a button is held
+- *(keys)* bind Tab to the preview pane
+- *(tree)* carry files, size, commits, and share in every row
+
+### Fixed
+
+- *(collect)* harden the tracked-file union and pin it with tests
+- *(collect)* show every file git tracks, dot-entries included
+- *(app)* keep a divider drag out of the full-screen reader
+- *(ui)* make the divider's round trip exact at any terminal width
+
+### Other
+
+- *(collect)* compare the merged findings with multiplicity
+- *(collect)* hold the fan-out claim across runs, not on each one
+- *(collect)* pin the Drop-time merge without a scheduler
+- Merge pull request #56 from getkono/dependabot/cargo/karet-pdf-0.6.1
+- Merge pull request #57 from getkono/dependabot/cargo/karet-core-0.6.1
+- Merge pull request #58 from getkono/dependabot/cargo/karet-filetype-0.6.1
+- Merge pull request #61 from getkono/dependabot/cargo/tokei-15.0.0
+- *(collect)* assert the walk actually fans out
+- *(collect)* benchmark the sequential and parallel walks
+- *(collect)* put the parallel merge under test
+- *(collect)* walk the filesystem in parallel
+- *(collect)* ground the walk's behaviour with property tests
+- split the crate into a library and a thin binary
+- state the walk's actual file set
+- *(ui)* [**breaking**] retire the detail panel
+
 ## [0.2.1](https://github.com/getkono/tree-tui/compare/v0.2.0...v0.2.1) - 2026-09-12
 
 ### Other
