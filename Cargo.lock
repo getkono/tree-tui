@@ -2747,9 +2747,9 @@ dependencies = [
 
 [[package]]
 name = "karet-editor"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a3be8fdc2122b047c00df9a7dce193bd0fd84bba33e4cc16d4b85ebb70a05e3"
+checksum = "2fee4c5f620afd8d7147e6159ac9171cb6ba34fdafd065acf2964ac6ba865168"
 dependencies = [
  "karet-core",
  "karet-syntax",
@@ -2792,9 +2792,9 @@ dependencies = [
 
 [[package]]
 name = "karet-syntax"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13c1d467e6a68ebdc72ded68977309abc6bbbd7a3c22a5636c898572eae33793"
+checksum = "29241158cf4bc1f3c4d39ae84975cafe7ea3ec56594d1bbd4278356397d44010"
 dependencies = [
  "karet-core",
  "karet-treesitter",
@@ -2803,9 +2803,9 @@ dependencies = [
 
 [[package]]
 name = "karet-text"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31abb43c0a0a1c2863c816fe892d6939b2006e0b9dbc8ad03cc55bcd6eaf0856"
+checksum = "5c00e457349093411f855bbc5bf50d816bc3c31ddef86e6c3260eda01c66d332"
 dependencies = [
  "karet-core",
  "memchr",
@@ -2816,9 +2816,9 @@ dependencies = [
 
 [[package]]
 name = "karet-theme"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fe89c3c0166fcfb36db54275ea14934a88e2c38f4225f1c935bc566fe984e9d"
+checksum = "9a5ee2c052a72e794d191875390e6b3436431d5d57131aae338b24457db41650"
 dependencies = [
  "karet-core",
  "palette",
@@ -2828,9 +2828,9 @@ dependencies = [
 
 [[package]]
 name = "karet-treesitter"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08384d2aa645fb9389f5c100eba689d6d17f49159b28331233c2ecac5a16d37d"
+checksum = "6c73a4619031c5f91c0cc26e80e3d682349948b85aaf3afff2f66c80a40dcaae"
 dependencies = [
  "cc",
  "codebook-tree-sitter-latex",
