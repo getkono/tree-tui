@@ -75,6 +75,18 @@ lto = true
 strip = true
 codegen-units = 1
 
+# Slim dev/test debuginfo so target/ stays small under fast iteration (`test`
+# inherits `dev`, package overrides included). tree-tui itself keeps line
+# tables, so its backtraces and panics still show file:line; dependency frames
+# keep symbol names but lose file:line. For full debuginfo, override with
+# `CARGO_PROFILE_DEV_DEBUG=2` (tree-tui) or
+# `cargo --config 'profile.dev.package."*".debug=2' ...` (dependencies).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [dev-dependencies]
 # `benches/walk.rs`: the sequential and parallel traversals, side by side.
 # Default features off — the HTML report pulls in a plotting stack this never
