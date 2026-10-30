@@ -23,8 +23,10 @@ walk (ignore, parallel)  ──►  build_skeleton  ──►  Tree (skeleton + 
   explicitly. Non-code files appear too.
 - The walk **traverses in parallel** (`ignore`'s `build_parallel`, one accumulator per thread
   merged once at the end). It is the app's only eager cost, and it runs on more than startup: every
-  debounced filesystem event re-walks the whole tree. `walk_with_sequential` is the same walk over
-  the single-threaded iterator, kept as the oracle for the differential tests and as the benchmark
+  debounced batch of filesystem events that holds a change (anything but a read: a create, modify,
+  remove, close after writing, or unclassified event; see `watch::is_change`) re-walks the whole
+  tree. A batch of reads alone (opens and closes without a write) is dropped and re-walks nothing.
+  `walk_with_sequential` is the same walk over the single-threaded iterator, kept as the oracle for the differential tests and as the benchmark
   baseline (`cargo bench`); both share the walk's `builder` and `record`, so they can differ in how
   an entry is reached and never in what is recorded for it.
 - The walk's output **order is unspecified** — `build_skeleton` sorts both lists before building
