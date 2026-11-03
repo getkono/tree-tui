@@ -2746,15 +2746,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "karet-core"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "694e25705e05636582f1dd8e819ae93239abfb956e192845eeb732ae4e197133"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "karet-editor"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fee4c5f620afd8d7147e6159ac9171cb6ba34fdafd065acf2964ac6ba865168"
 dependencies = [
- "karet-core",
+ "karet-core 0.6.1",
  "karet-syntax",
  "karet-text",
- "karet-theme",
+ "karet-theme 0.6.1",
  "ratatui",
  "unicode-width",
 ]
@@ -2766,16 +2775,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04834167bcb832f83a81768f4a0cd65a22b39ab3f1b59cde48a43bbe35492069"
 
 [[package]]
-name = "karet-fileview"
-version = "0.6.1"
+name = "karet-filetype"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "820127f59b751d0308697e53181aedf4e14198e7a8c48b21846676a8084a9f34"
+checksum = "9560a9b9769a92f786ff34fefa955899f3199369c703120a7ed1941077b69dd1"
+
+[[package]]
+name = "karet-fileview"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bef02f0738981c0397a62bc2144440a98f581cc16cde008b01e2e8501b7f069"
 dependencies = [
  "base64",
  "gamut",
- "karet-core",
- "karet-filetype",
- "karet-theme",
+ "karet-core 0.7.1",
+ "karet-filetype 0.7.1",
+ "karet-theme 0.7.1",
  "ratatui",
  "thiserror 2.0.20",
 ]
@@ -2796,7 +2811,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29241158cf4bc1f3c4d39ae84975cafe7ea3ec56594d1bbd4278356397d44010"
 dependencies = [
- "karet-core",
+ "karet-core 0.6.1",
  "karet-treesitter",
  "thiserror 2.0.20",
 ]
@@ -2807,7 +2822,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c00e457349093411f855bbc5bf50d816bc3c31ddef86e6c3260eda01c66d332"
 dependencies = [
- "karet-core",
+ "karet-core 0.6.1",
  "memchr",
  "ropey",
  "tempfile",
@@ -2820,7 +2835,19 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a5ee2c052a72e794d191875390e6b3436431d5d57131aae338b24457db41650"
 dependencies = [
- "karet-core",
+ "karet-core 0.6.1",
+ "palette",
+ "ratatui",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "karet-theme"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f2bfcbf40155c73f01b3b9c64e835fa34a5bb42de6b4d104be79d481acde0b8"
+dependencies = [
+ "karet-core 0.7.1",
  "palette",
  "ratatui",
  "thiserror 2.0.20",
@@ -2834,8 +2861,8 @@ checksum = "6c73a4619031c5f91c0cc26e80e3d682349948b85aaf3afff2f66c80a40dcaae"
 dependencies = [
  "cc",
  "codebook-tree-sitter-latex",
- "karet-core",
- "karet-filetype",
+ "karet-core 0.6.1",
+ "karet-filetype 0.6.1",
  "thiserror 2.0.20",
  "tree-sitter",
  "tree-sitter-asciidoc",
@@ -5226,14 +5253,14 @@ dependencies = [
  "futures",
  "gix",
  "ignore",
- "karet-core",
+ "karet-core 0.6.1",
  "karet-editor",
- "karet-filetype",
+ "karet-filetype 0.6.1",
  "karet-fileview",
  "karet-pdf",
  "karet-syntax",
  "karet-text",
- "karet-theme",
+ "karet-theme 0.6.1",
  "karet-treesitter",
  "notify-debouncer-full",
  "proptest",
