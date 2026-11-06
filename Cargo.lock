@@ -2756,14 +2756,14 @@ dependencies = [
 
 [[package]]
 name = "karet-editor"
-version = "0.6.1"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fee4c5f620afd8d7147e6159ac9171cb6ba34fdafd065acf2964ac6ba865168"
+checksum = "cec4699d8a3b1524e7a14abbf514834db572a45edb9b076d248c06250f9321b7"
 dependencies = [
- "karet-core 0.6.1",
- "karet-syntax",
- "karet-text",
- "karet-theme 0.6.1",
+ "karet-core 0.7.1",
+ "karet-syntax 0.7.1",
+ "karet-text 0.7.1",
+ "karet-theme 0.7.1",
  "ratatui",
  "unicode-width",
 ]
@@ -2812,7 +2812,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29241158cf4bc1f3c4d39ae84975cafe7ea3ec56594d1bbd4278356397d44010"
 dependencies = [
  "karet-core 0.6.1",
- "karet-treesitter",
+ "karet-treesitter 0.6.1",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "karet-syntax"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8706a90aded45da47912b5e79511e8ea7c47627ff74f2b854a2c38348ec81a3"
+dependencies = [
+ "karet-core 0.7.1",
+ "karet-treesitter 0.7.1",
  "thiserror 2.0.20",
 ]
 
@@ -2823,6 +2834,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c00e457349093411f855bbc5bf50d816bc3c31ddef86e6c3260eda01c66d332"
 dependencies = [
  "karet-core 0.6.1",
+ "memchr",
+ "ropey",
+ "tempfile",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "karet-text"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ea19659e91e0d02fa3b0c7d78a9d900612eea8436f3d06834fed37343da36f2"
+dependencies = [
+ "karet-core 0.7.1",
  "memchr",
  "ropey",
  "tempfile",
@@ -2920,6 +2944,20 @@ dependencies = [
  "tree-sitter-yaml",
  "tree-sitter-zig",
  "tree-sitter-zsh",
+]
+
+[[package]]
+name = "karet-treesitter"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a252573a9301a1b26be8126c11ec748e10e44a26b23e908a3f3c15c902b42a4c"
+dependencies = [
+ "cc",
+ "karet-core 0.7.1",
+ "karet-filetype 0.7.1",
+ "thiserror 2.0.20",
+ "tree-sitter",
+ "tree-sitter-language",
 ]
 
 [[package]]
@@ -5258,10 +5296,10 @@ dependencies = [
  "karet-filetype 0.6.1",
  "karet-fileview",
  "karet-pdf",
- "karet-syntax",
- "karet-text",
+ "karet-syntax 0.6.1",
+ "karet-text 0.6.1",
  "karet-theme 0.6.1",
- "karet-treesitter",
+ "karet-treesitter 0.6.1",
  "notify-debouncer-full",
  "proptest",
  "ratatui",
