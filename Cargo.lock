@@ -5253,7 +5253,7 @@ dependencies = [
  "futures",
  "gix",
  "ignore",
- "karet-core 0.6.1",
+ "karet-core 0.7.1",
  "karet-editor",
  "karet-filetype 0.6.1",
  "karet-fileview",
