@@ -201,7 +201,8 @@ pub struct Loaded {
     /// The sort sub-key (scoped to the active lens).
     pub sort_key: SubKey,
     pub sort_dir: SortDir,
-    /// Whether the (computed) code layer reported a parsing ambiguity.
+    /// Whether the (computed) code layer could not read some source file, so
+    /// its lines are missing from the totals.
     pub inaccurate: bool,
     /// Bumped on every content rebuild; part of the row-cache key so navigation
     /// frames reuse the built rows but any content change rebuilds them.
@@ -280,6 +281,23 @@ impl App {
             Screen::Reader(reader) => Some(&mut reader.loaded),
             _ => None,
         }
+    }
+
+    /// The walked files (paths relative to the root), which the code lens
+    /// counts. Empty before the first walk completes.
+    pub fn file_paths(&self) -> Vec<PathBuf> {
+        let loaded = match &self.screen {
+            Screen::Loaded(loaded) => loaded,
+            Screen::Reader(reader) => &reader.loaded,
+            Screen::Loading | Screen::Error(_) => return Vec::new(),
+        };
+        loaded
+            .tree
+            .nodes
+            .iter()
+            .filter(|node| !node.is_dir())
+            .map(|node| node.rel_path.clone())
+            .collect()
     }
 
     /// Transition from `Loading` to `Loaded` once the walk completes, and request
@@ -2356,6 +2374,31 @@ mod tests {
         });
         assert_eq!(app.pending_compute, Some(Lens::Code));
         assert!(app.is_busy());
+    }
+
+    /// The code collector is handed the walked files — files only, as paths
+    /// relative to the root — and nothing before the first walk.
+    #[test]
+    fn file_paths_lists_the_walked_files() {
+        let mut app = App::new(PathBuf::from("/p"), "p".into());
+        assert!(app.file_paths().is_empty());
+        let tree = build_skeleton(
+            &[(PathBuf::from("src/a.rs"), 1), (PathBuf::from("b.md"), 1)],
+            &[PathBuf::from("empty")],
+            "p".into(),
+        );
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+        let mut files = app.file_paths();
+        files.sort();
+        assert_eq!(
+            files,
+            vec![PathBuf::from("b.md"), PathBuf::from("src/a.rs")]
+        );
     }
 
     #[test]

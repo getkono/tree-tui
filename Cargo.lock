@@ -5383,6 +5383,7 @@ dependencies = [
  "color-eyre",
  "criterion",
  "crossterm",
+ "encoding_rs_io",
  "eyre",
  "futures",
  "gix",

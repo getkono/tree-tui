@@ -94,6 +94,15 @@ Three things the dispatch owns are worth knowing about:
 **Modular tools:**
 
 - **Collectors** (`collect::{walk, code, git}`) — independent data sources keyed by relative path.
+  The code collector counts exactly the walked files (the event loop hands it the tree's file
+  list), so a force-added ignored file is counted like any other. It uses tokei per file, for the
+  language and the code/comment split, and corrects two things tokei does differently from what the
+  lens means. **Blank** is decided per line, in any comment or string state: whitespace (Unicode,
+  plus zero-width characters) or a bare comment marker (`//`, `///`, `#`, a lone `*` in a `/* */`
+  language). **Embedded languages** (Markdown fences) are folded back into the file's totals, and
+  Rust doc comments are counted as the file's own comments rather than lifted into a Markdown
+  blob, which tokei mis-scans. Each file keeps `code + comments + blanks` equal to its physical
+  line count; a property test holds the per-file count to it.
 - **Lens presentation** (`model::lens`) — each lens is a variant of the `Lens` enum, with its
   behavior localized to `match` arms (`columns`, `primary`, `sub_keys`, …).
 
