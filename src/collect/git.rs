@@ -88,7 +88,7 @@ pub fn churn(scan_root: &Path) -> HashMap<PathBuf, ChurnData> {
                 entry.commits += 1;
             }
             cache.clear_resource_cache_keep_allocation();
-            Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Continue(()))
+            Ok(gix::object::tree::diff::Action::Continue(()))
         });
     }
 
@@ -196,9 +196,10 @@ fn repo_prefix(repo: &gix::Repository, scan_root: &Path) -> Option<PathBuf> {
 }
 
 /// Convert a repo-relative git path to a path relative to the scanned root, or
-/// `None` if it lies outside the scanned subtree.
+/// `None` if it lies outside the scanned subtree, or isn't representable as a
+/// native path (non-UTF-8 bytes on a non-Unix platform).
 fn tree_rel(location: &BStr, prefix: &Option<PathBuf>) -> Option<PathBuf> {
-    let path = gix::path::from_bstr(location);
+    let path = gix::path::from_bstr(location).ok()?;
     match prefix {
         Some(p) if !p.as_os_str().is_empty() => path.strip_prefix(p).ok().map(Path::to_path_buf),
         _ => Some(path.into_owned()),

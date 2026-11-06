@@ -42,31 +42,31 @@ futures = "0.3"
 ignore = "0.4"
 # Pure-Rust git (no external binary, no C toolchain) for the churn/status lenses.
 # Keep gix's defaults (they pull in the hash backend) and add what the lenses need.
-gix = { version = "0.87", features = ["revision", "blob-diff", "status", "dirwalk"] }
+gix = { version = "0.90", features = ["revision", "blob-diff", "status", "dirwalk"] }
 ratatui = "0.30.2"
 # The karet toolkit. `karet-fileview` ships only the read-only primitives (hex
 # dump, terminal image, placeholder) + `classify`; composing them with the editor
 # and the tree-sitter stack into one "render any file" view is our job — see
 # `src/ui/fileview.rs`. All `karet-*` crates release in lockstep, so they move
 # together.
-karet-core = "0.6.0"
-karet-editor = "0.6.0"
-karet-filetype = "0.6.0"
+karet-core = "0.7.1"
+karet-editor = "0.7.1"
+karet-filetype = "0.7.1"
 karet-fileview = { version = "0.7.1", default-features = false }
-karet-pdf = { version = "0.6.0", optional = true }
-karet-syntax = "0.6.0"
-karet-text = "0.6.0"
-karet-theme = { version = "0.6.0", features = ["view"] }
+karet-pdf = { version = "0.7.1", optional = true }
+karet-syntax = "0.7.1"
+karet-text = "0.7.1"
+karet-theme = { version = "0.7.1", features = ["view"] }
 # The grammars live on the parse host; karet-syntax's `lang-*` are pass-throughs,
 # so enabling the bundle here covers the whole highlight path.
-karet-treesitter = { version = "0.6.0", features = ["all-languages"] }
-thiserror = "2.0.20"
+karet-treesitter = { version = "0.7.1", features = ["all-languages"] }
+thiserror = "2.0.21"
 tokei = { version = "15", default-features = false }
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-unicode-width = "0.2.2"
+unicode-width = "0.2.3"
 notify-debouncer-full = "0.7.0"
 
 # A tidy, self-contained binary for `mise run install`.
@@ -97,7 +97,7 @@ criterion = { version = "0.8.2", default-features = false, features = ["cargo_be
 # practical way to cover the interaction of nesting, dot-entries, ignore rules
 # and the tracked-file union. Default features off — the fork/timeout/regex
 # machinery isn't used, and skipping it keeps the dev tree to six crates.
-proptest = { version = "1.11.0", default-features = false, features = ["std"] }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 
 # `harness = false` hands the target's `main` to criterion. `test = false` keeps
 # `cargo test` from running every benchmark once — which would write the
