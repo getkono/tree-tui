@@ -1,8 +1,8 @@
 //! Modular data collectors and the lazy lens-computation entry point.
 //!
 //! Each collector is an independent data source keyed by relative path:
-//! [`walk()`] (skeleton + size, run eagerly at startup) and `code` (tokei, run
-//! lazily). Git collectors arrive in a later phase. [`compute`] runs the
+//! [`walk()`] (skeleton + size, run eagerly at startup), `code` (line counts
+//! over the walked files, run lazily), and the history/status collectors. [`compute`] runs the
 //! collector for one lens on a background thread; the app aggregates the result
 //! into a cached [`Layer`](crate::model::Layer).
 
@@ -50,12 +50,14 @@ impl LayerResult {
 
 /// Compute a lens's per-file data. Called from a blocking thread.
 ///
-/// `Size` reads the always-present node bytes and never reaches here. Git lenses
-/// degrade to empty maps outside a repository (and are unavailable there anyway).
-pub fn compute(lens: Lens, root: &Path) -> LayerResult {
+/// `files` is the walked file set (paths relative to `root`): the code lens
+/// counts exactly those, and the git lenses ignore it. `Size` reads the
+/// always-present node bytes and never reaches here. Git lenses degrade to
+/// empty maps outside a repository (and are unavailable there anyway).
+pub fn compute(lens: Lens, root: &Path, files: &[PathBuf]) -> LayerResult {
     match lens {
         Lens::Code => {
-            let (files, inaccurate) = code::collect_code(root);
+            let (files, inaccurate) = code::collect_code(root, files);
             LayerResult::Code { files, inaccurate }
         }
         Lens::Churn => LayerResult::Churn(git::churn(root)),

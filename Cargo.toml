@@ -36,6 +36,9 @@ path = "src/main.rs"
 color-eyre = "0.6.5"
 crossterm = { version = "0.29", features = ["event-stream"] }
 eyre = "0.6.14"
+# BOM-sniffing reader (UTF-16 → UTF-8), the same one tokei reads files with, so
+# the code lens decodes a source file exactly as tokei would.
+encoding_rs_io = "0.1.7"
 futures = "0.3"
 # Filesystem walk that honors .gitignore/.ignore (the same crate tokei uses);
 # the tree skeleton + per-file size come from this, independent of language.

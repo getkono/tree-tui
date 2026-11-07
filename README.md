@@ -23,7 +23,7 @@ meaningful too.
 
 | Key | Lens | Shows |
 | --- | --- | --- |
-| `1` | **code** | lines of code / comments / blanks, with a per-language breakdown (via tokei) |
+| `1` | **code** | lines of code / comments / blanks, with a per-language breakdown (via tokei). Doc comments and fenced code count; a line of only whitespace or a bare comment marker (`//`, `#`) is blank, even inside a comment or string |
 | `2` | **size** | on-disk size in bytes, human-readable — find what's bloating the repo |
 | `3` | **churn** | lines added/deleted and how often files change, over recent git history |
 | `4` | **status** | uncommitted working-tree changes (added / modified / deleted), rolled up per folder |
@@ -144,8 +144,8 @@ The TUI owns the terminal, so logs go to a file and only when asked. Set `TREE_L
 2. **Lenses** — a `Lens` is an exhaustive enum that decides *what* is shown and *how* (columns, the
    primary value, sortable sub-keys). Sorting reads a precomputed per-node value slice, so one
    routine serves every lens.
-3. **Collectors** — each expensive metric has an independent collector (`tokei` for code, `gix` for
-   churn/status). When a lens is first opened, the event loop runs its collector on a blocking thread
+3. **Collectors** — each expensive metric has an independent collector (`tokei`, run per walked
+   file, for code; `gix` for churn/status). When a lens is first opened, the event loop runs its collector on a blocking thread
    and reports the per-file result over a channel.
 4. **Aggregate + cache** — the result is folded bottom-up into a per-node *layer* and cached; the
    active lens re-sorts and re-renders. The `tokio::select!` event loop redraws only on change.

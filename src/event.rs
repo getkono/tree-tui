@@ -111,8 +111,9 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> color_eyre::R
         if let Some(lens) = app.pending_compute.take() {
             let tx = lens_tx.clone();
             let root = app.root.clone();
+            let files = app.files_for(lens);
             tokio::task::spawn_blocking(move || {
-                let _ = tx.send(collect::compute(lens, &root));
+                let _ = tx.send(collect::compute(lens, &root, &files));
             });
         }
 
