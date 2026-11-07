@@ -206,7 +206,9 @@ Otherwise a lockfile name or a header marker marks the file.
 **Benchmarks and examples** (`bench`) are tagged two ways:
 
 - whole files under a `benches`, `bench`, `benchmarks`, `examples` or `example` directory, in any
-  language (`tags::paths::is_bench_path`);
+  language (`tags::paths::is_bench_path`). Only directories above the first `src` count: below
+  it `example` is as often a package or module name (`src/main/java/com/example/…`), so such
+  files are not tagged;
 - Rust items carrying libtest's `#[bench]`, found by the same attribute pairing as test items.
   Criterion and divan benchmarks live under `benches/`, so the path rule catches them.
 
