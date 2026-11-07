@@ -67,7 +67,8 @@ pub fn render(
                 // Facets only act on the code lens, so only it advertises them;
                 // last, so a narrow footer truncates them before the essentials.
                 if active_lens == Lens::Code {
-                    let keys = Facet::live()
+                    let keys = Facet::ALL
+                        .into_iter()
                         .map(|facet| facet.key().to_string())
                         .collect::<Vec<_>>()
                         .join("/");

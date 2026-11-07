@@ -149,9 +149,9 @@ and `lines` also drops hidden kinds. Share, sort, `z`, exclusion and the header 
 through it. `CodeData::counted_langs` applies the same rule per language, for the legend and the
 header's language count.
 
-A facet whose lines the collector cannot produce yet is not *live* (`Facet::is_live`). It has no
-key, no chip, and no `--hide` value. Turning one on takes a detector that files lines under its
-tag, plus flipping its `is_live` arm.
+Adding a facet means adding a `Facet` variant, whose match arms the compiler then demands (label,
+key, bit, and a `TagSet` for a tag facet), plus a detector that files lines under its tag. Keys,
+chips, help rows, the footer hint, and `--hide` values are all generated from `Facet::ALL`.
 
 ### Detecting tags (`collect::tags`)
 
@@ -169,7 +169,7 @@ and comments. Line and blank totals never change.
   `*Test.java`, …). A test path skips parsing. For Rust and Zig only Cargo's `tests/` counts,
   because a `pub mod test` or `mod spec` under `src/` is as likely shipped code, and those files
   are read in-file instead.
-- Before parsing, a file must contain `test` (or `quickcheck`, the one marker without it), and be
+- Before parsing, a file must contain `test`, `quickcheck` or `bench` (the markers without `test` in them), and be
   at most 1 MiB. Most source files fail the first check, and huge files are generated bindings.
 - **In the file**, for Rust and Zig, through tree-sitter via karet's parse host. These are the
   languages that keep tests next to the code.
@@ -209,7 +209,17 @@ Otherwise a lockfile name or a header marker marks the file.
   - Prose formats (tokei's literate languages, such as Markdown) are never read: their text talks
     about generated code without being generated.
 
-A file can carry several tags (a generated test file). It is hidden once by either facet.
+**Benchmarks and examples** (`bench`) are tagged two ways:
+
+- whole files under a `benches`, `bench`, `benchmarks`, `examples` or `example` directory, in any
+  language (`tags::paths::is_bench_path`). Only directories above the first `src` count: below
+  it `example` is as often a package or module name (`src/main/java/com/example/…`), so such
+  files are not tagged;
+- Rust items carrying libtest's `#[bench]`, found by the same attribute pairing as test items.
+  Criterion and divan benchmarks live under `benches/`, so the path rule catches them.
+
+A file can carry several tags (a generated test file, a `#[test]` inside `benches/`). Each line is
+hidden once by any facet it carries, because the buckets are keyed by the whole tag set.
 
 Known gaps (generated detection):
 

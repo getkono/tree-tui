@@ -38,17 +38,17 @@ const BINDINGS: &[(&str, &str)] = &[
     ("q / Ctrl-c", "quit"),
 ];
 
-/// The bindings, with one row per live line facet slotted in after `x` (they
-/// are generated, so a facet the collector cannot produce yet has no row).
+/// The bindings, with one row per line facet slotted in after `x` (generated
+/// from `Facet::ALL`, so a new facet gets its row for free).
 fn bindings() -> Vec<(String, String)> {
     let mut rows = Vec::with_capacity(BINDINGS.len() + Facet::ALL.len());
     for &(keys, description) in BINDINGS {
         rows.push((keys.to_string(), description.to_string()));
         if keys == FACET_ANCHOR {
-            rows.extend(Facet::live().map(|facet| {
+            rows.extend(Facet::ALL.into_iter().map(|facet| {
                 (
                     facet.key().to_string(),
-                    format!("hide / show {} lines (or click)", facet.label()),
+                    format!("hide / show {} lines (or click)", facet.description()),
                 )
             }));
         }
@@ -74,7 +74,10 @@ pub fn render(frame: &mut Frame, area: Rect) {
         ]));
     }
 
-    let width = (key_width + 40).min(area.width.saturating_sub(4) as usize) as u16;
+    // Fit the longest row: its display width plus the two borders and the
+    // horizontal padding, so no description is cut off when the screen allows.
+    let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let width = (content_width + 4).min(area.width.saturating_sub(4) as usize) as u16;
     let height = (lines.len() + 2).min(area.height.saturating_sub(2) as usize) as u16;
     let [row] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
@@ -96,7 +99,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
 
-    /// Every live facet gets a row, right after the anchor binding.
+    /// Every facet gets a row, right after the anchor binding.
     #[test]
     fn facet_rows_follow_the_anchor() {
         let rows = bindings();
@@ -104,12 +107,36 @@ mod tests {
             .iter()
             .position(|(keys, _)| keys == FACET_ANCHOR)
             .expect("the anchor binding exists");
-        let live: Vec<Facet> = Facet::live().collect();
-        for (offset, facet) in live.iter().enumerate() {
+        let facets: Vec<Facet> = Facet::ALL.into_iter().collect();
+        for (offset, facet) in facets.iter().enumerate() {
             let (keys, description) = &rows[anchor + 1 + offset];
             assert_eq!(keys, &facet.key().to_string());
             assert!(description.contains(facet.label()), "{description}");
         }
-        assert_eq!(rows.len(), BINDINGS.len() + live.len());
+        // The bench chip says only `bench`; its help row names examples too.
+        let bench = Facet::ALL
+            .iter()
+            .position(|&facet| facet == Facet::BenchExample)
+            .expect("bench is a facet");
+        assert!(rows[anchor + 1 + bench].1.contains("example"));
+        assert_eq!(rows.len(), BINDINGS.len() + facets.len());
+    }
+
+    /// On a roomy screen the popup is wide enough that every row shows whole.
+    #[test]
+    fn every_row_fits_the_popup() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| render(frame, frame.area())).unwrap();
+        let view = format!("{}", terminal.backend());
+        for (keys, description) in bindings() {
+            assert!(view.contains(&keys), "key {keys:?} cut off:\n{view}");
+            assert!(
+                view.contains(&description),
+                "row {description:?} cut off:\n{view}"
+            );
+        }
     }
 }
