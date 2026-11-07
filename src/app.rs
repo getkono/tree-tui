@@ -300,6 +300,17 @@ impl App {
             .collect()
     }
 
+    /// The file list handed to `collect::compute` for `lens`: the walked files
+    /// for the code lens, which counts exactly them, and nothing for the
+    /// history and status lenses, which read the repository themselves.
+    pub fn files_for(&self, lens: Lens) -> Vec<PathBuf> {
+        if lens == Lens::Code {
+            self.file_paths()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Transition from `Loading` to `Loaded` once the walk completes, and request
     /// the default lens's data.
     pub fn on_scan(&mut self, outcome: ScanOutcome) {
@@ -2399,6 +2410,30 @@ mod tests {
             files,
             vec![PathBuf::from("b.md"), PathBuf::from("src/a.rs")]
         );
+    }
+
+    /// The event loop hands `compute` the walked files only for the code
+    /// lens; an empty list there would leave the code lens empty.
+    #[test]
+    fn files_for_gives_the_walked_files_to_the_code_lens_only() {
+        let mut app = App::new(PathBuf::from("/p"), "p".into());
+        let tree = build_skeleton(
+            &[(PathBuf::from("src/a.rs"), 1), (PathBuf::from("b.md"), 1)],
+            &[],
+            "p".into(),
+        );
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+        let mut code = app.files_for(Lens::Code);
+        code.sort();
+        assert_eq!(code, vec![PathBuf::from("b.md"), PathBuf::from("src/a.rs")]);
+        for lens in [Lens::Churn, Lens::Status, Lens::Size] {
+            assert!(app.files_for(lens).is_empty(), "{lens:?}");
+        }
     }
 
     #[test]
