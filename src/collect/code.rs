@@ -173,13 +173,17 @@ pub fn count_file(lang: LanguageType, text: &[u8], config: &Config) -> FileCount
 }
 
 /// `line` with a leading Rust doc-comment marker (`///`, `//!`, or the `////`
-/// tokei mistakes for one) rewritten to a plain `//`.
+/// tokei mistakes for one) turned into a plain `//` comment.
 ///
 /// tokei lifts a doc block into a Markdown blob, and the lookahead that finds
 /// one trims across line ends: a code line holding a string literal, directly
 /// above a doc comment, drops out of its counts. A plain `//` comment takes no
-/// such path, yet stays a comment to tokei — or code, inside a string literal
-/// — and leaves any `*/` later on the line in view, so the comment and string
+/// such path, yet stays a comment to tokei — or code, inside a string literal.
+///
+/// Only the marker itself is touched: a space goes in after its first two
+/// characters (`///* x` becomes `// /* x`), and every other byte stays where
+/// it was. The marker's third character can open a token — the `/` of a
+/// nested `/*`, or of a `*/` — so it is kept, and the comment and string
 /// state carries on as it would have.
 fn plain_rust_comment(lang: LanguageType, line: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     let indent = line.len() - line.trim_ascii_start().len();
@@ -188,12 +192,10 @@ fn plain_rust_comment(lang: LanguageType, line: &[u8]) -> std::borrow::Cow<'_, [
     if lang != LanguageType::Rust || !is_doc {
         return std::borrow::Cow::Borrowed(line);
     }
-    let rest = body[2..].trim_ascii_start();
-    let rest = &rest[rest.iter().take_while(|&&b| b == b'/' || b == b'!').count()..];
-    let mut plain = Vec::with_capacity(line.len());
-    plain.extend_from_slice(&line[..indent]);
-    plain.extend_from_slice(b"// ");
-    plain.extend_from_slice(rest);
+    let mut plain = Vec::with_capacity(line.len() + 1);
+    plain.extend_from_slice(&line[..indent + 2]);
+    plain.push(b' ');
+    plain.extend_from_slice(&body[2..]);
     std::borrow::Cow::Owned(plain)
 }
 
@@ -685,6 +687,16 @@ mod tests {
     fn a_doc_line_keeps_the_block_comment_state() {
         let counts = count(LanguageType::Rust, "/*\n/// */\nfn main() {}\n");
         assert_eq!(counts.total, num(1, 2, 0));
+    }
+
+    /// A `///*` line inside a block comment keeps the nested `/*` it opens, so
+    /// the comment needs two closers.
+    #[test]
+    fn a_doc_line_keeps_a_nested_block_comment_opener() {
+        let text = "/*\n///* inner\n*/\n*/\nfn main() {}\n";
+        assert_eq!(count(LanguageType::Rust, text).total, num(1, 4, 0));
+        let text = "/*\n//!/* inner\n*/\n*/\nfn main() {}\n";
+        assert_eq!(count(LanguageType::Rust, text).total, num(1, 4, 0));
     }
 
     /// A doc-comment marker is classified as tokei classifies a plain `//` in
