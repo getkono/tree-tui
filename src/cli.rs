@@ -1,5 +1,5 @@
-//! Strict command-line parsing: `tree [dir]` plus `--icons`, `-V/--version`, and
-//! `-h/--help`.
+//! Strict command-line parsing: `tree [dir]` plus `--icons`, `--hide`,
+//! `-V/--version`, and `-h/--help`.
 //!
 //! The grammar is intentionally tight — at most one positional directory
 //! (defaulting to `.`), no unknown flags, no extra positionals. Anything else is
@@ -12,6 +12,8 @@
 use std::path::PathBuf;
 
 use karet_filetype::IconStyle;
+
+use crate::model::{Facet, Hidden};
 
 /// Environment variable consulted when `--icons` is absent.
 pub const ICONS_ENV: &str = "TREE_TUI_ICONS";
@@ -35,6 +37,8 @@ pub enum Command {
         /// The glyph tier from `--icons`, or `None` to fall back (see
         /// [`resolve_icons`]).
         icons: Option<IconStyle>,
+        /// The line facets hidden from the code lens at startup (`--hide`).
+        hide: Hidden,
     },
     /// Print the version / build report and exit.
     Version,
@@ -55,8 +59,13 @@ pub enum CliError {
     #[error("{0} needs a value")]
     MissingValue(&'static str),
     /// A flag's value was not one this flag accepts.
-    #[error("invalid value for {flag}: {value:?} (expected nerd, unicode, or ascii)")]
-    BadValue { flag: &'static str, value: String },
+    #[error("invalid value for {flag}: {value:?} (expected {expected})")]
+    BadValue {
+        flag: &'static str,
+        value: String,
+        /// The accepted values, as listed in the message.
+        expected: String,
+    },
 }
 
 /// Resolve the icon tier: the `--icons` flag wins, then `TREE_TUI_ICONS`, then
@@ -85,6 +94,7 @@ where
 {
     let mut dir: Option<String> = None;
     let mut icons: Option<IconStyle> = None;
+    let mut hide = Hidden::default();
     let mut args = args.into_iter().map(Into::into);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -98,6 +108,12 @@ where
             s if s.starts_with("--icons=") => {
                 icons = Some(icon_style(&s["--icons=".len()..])?);
             }
+            // `--hide test,blank`, `--hide=comment`; repeatable, and additive.
+            "--hide" => {
+                let value = args.next().ok_or(CliError::MissingValue("--hide"))?;
+                hide_facets(&value, &mut hide)?;
+            }
+            s if s.starts_with("--hide=") => hide_facets(&s["--hide=".len()..], &mut hide)?,
             s if s.starts_with('-') && s != "-" => return Err(CliError::UnknownFlag(arg)),
             _ if dir.is_some() => return Err(CliError::ExtraArg(arg)),
             _ => dir = Some(arg),
@@ -106,6 +122,7 @@ where
     Ok(Command::Run {
         dir: PathBuf::from(dir.unwrap_or_else(|| ".".to_string())),
         icons,
+        hide,
     })
 }
 
@@ -114,17 +131,43 @@ fn icon_style(value: &str) -> Result<IconStyle, CliError> {
     IconStyle::from_name(value).ok_or_else(|| CliError::BadValue {
         flag: "--icons",
         value: value.to_string(),
+        expected: "nerd, unicode, or ascii".to_string(),
     })
+}
+
+/// Add the facets named in a comma-separated `--hide` value to `hide`. Only
+/// facets the collector can produce are accepted; the rest are reported with
+/// the accepted names.
+fn hide_facets(value: &str, hide: &mut Hidden) -> Result<(), CliError> {
+    for name in value.split(',') {
+        let facet = Facet::from_label(name.trim())
+            .filter(|facet| facet.is_live())
+            .ok_or_else(|| CliError::BadValue {
+                flag: "--hide",
+                value: name.trim().to_string(),
+                expected: Facet::live()
+                    .map(Facet::label)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            })?;
+        hide.insert(facet);
+    }
+    Ok(())
 }
 
 /// The multi-line usage string.
 pub fn usage() -> String {
+    let hide = Facet::live()
+        .map(Facet::label)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "{BIN_NAME} — interactive directory visualizer (code, size, git)\n\
          \n\
          usage:\n  \
            {BIN_NAME} [dir]           explore [dir] (default: .) through swappable lenses\n  \
            {BIN_NAME} --icons <tier>  glyph tier: unicode (default), nerd, or ascii\n  \
+           {BIN_NAME} --hide <list>   hide line facets from the code lens ({hide}), comma-separated\n  \
            {BIN_NAME} -V, --version   print version and build info\n  \
            {BIN_NAME} -h, --help      print this help\n\
          \n\
@@ -145,7 +188,62 @@ mod tests {
         Command::Run {
             dir: dir.into(),
             icons: None,
+            hide: Hidden::default(),
         }
+    }
+
+    fn hidden(facets: &[Facet]) -> Hidden {
+        let mut hide = Hidden::default();
+        for &facet in facets {
+            hide.insert(facet);
+        }
+        hide
+    }
+
+    #[test]
+    fn hide_takes_a_list_either_way_and_repeats() {
+        let both = Command::Run {
+            dir: "src".into(),
+            icons: None,
+            hide: hidden(&[Facet::Comment, Facet::Blank]),
+        };
+        assert_eq!(
+            parse_args(&["--hide", "comment,blank", "src"]).unwrap(),
+            both
+        );
+        assert_eq!(
+            parse_args(&["src", "--hide=blank", "--hide", "comment"]).unwrap(),
+            both
+        );
+        assert_eq!(
+            parse_args(&["--hide", "blank, blank", "src"]).unwrap(),
+            Command::Run {
+                dir: "src".into(),
+                icons: None,
+                hide: hidden(&[Facet::Blank]),
+            }
+        );
+    }
+
+    #[test]
+    fn hide_rejects_a_missing_unknown_or_unavailable_facet() {
+        assert_eq!(
+            parse_args(&["--hide"]),
+            Err(CliError::MissingValue("--hide"))
+        );
+        for bad in ["tests", "", "comment,nope"] {
+            let err = parse_args(&["--hide", bad]).unwrap_err();
+            assert!(
+                matches!(&err, CliError::BadValue { flag: "--hide", expected, .. }
+                    if expected == "comment, blank"),
+                "{bad:?} gave {err:?}"
+            );
+        }
+        // Known, but nothing produces it yet.
+        assert!(matches!(
+            parse_args(&["--hide=test"]),
+            Err(CliError::BadValue { flag: "--hide", .. })
+        ));
     }
 
     #[test]
@@ -161,6 +259,7 @@ mod tests {
                 Command::Run {
                     dir: ".".into(),
                     icons: Some(IconStyle::Ascii),
+                    hide: Hidden::default(),
                 }
             );
         }
@@ -177,6 +276,7 @@ mod tests {
             Err(CliError::BadValue {
                 flag: "--icons",
                 value: "emoji".to_string(),
+                expected: "nerd, unicode, or ascii".to_string(),
             })
         );
     }

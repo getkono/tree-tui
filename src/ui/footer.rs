@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use super::theme;
-use crate::model::{Lens, SortDir, SubKey};
+use crate::model::{Facet, Lens, SortDir, SubKey};
 
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -60,10 +60,21 @@ pub fn render(
                 format!("   computing {}…", lens.label()),
                 Style::default().fg(theme::WARN),
             )),
-            None => spans.push(muted(
-                "   m lens · s sort · r reverse · z declutter · x exclude · / filter · ? help · q quit"
-                    .to_string(),
-            )),
+            None => {
+                let mut hint = String::from(
+                    "   m lens · s sort · r reverse · z declutter · x exclude · / filter · ? help · q quit",
+                );
+                // Facets only act on the code lens, so only it advertises them;
+                // last, so a narrow footer truncates them before the essentials.
+                if active_lens == Lens::Code {
+                    let keys = Facet::live()
+                        .map(|facet| facet.key().to_string())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    hint.push_str(&format!(" · {keys} hide lines"));
+                }
+                spans.push(muted(hint));
+            }
         }
         Line::from(spans)
     };

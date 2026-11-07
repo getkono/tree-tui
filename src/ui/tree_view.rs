@@ -141,11 +141,14 @@ impl Columns {
         )))];
 
         if self.lang_width > 0 {
-            let empty = BTreeMap::new();
-            let langs = loaded.code_at(id).map_or(&empty, |c| &c.langs);
+            // The legend splits what `lines` counts, so it follows the facet
+            // filter: hidden tags and kinds are out of both.
+            let langs = loaded
+                .code_at(id)
+                .map_or_else(BTreeMap::new, |c| c.counted_langs(loaded.hidden));
             let total = loaded.value(SubKey::Lines, id) as usize;
             cells.push(Cell::from(Line::from(language_legend(
-                langs,
+                &langs,
                 total,
                 self.lang_width,
             ))));
@@ -208,8 +211,9 @@ pub fn render(frame: &mut Frame, loaded: &mut Loaded, area: Rect) {
             if matches!(lens, Lens::Code)
                 && let Some(code) = loaded.code_at(id)
             {
-                desired_legend =
-                    desired_legend.max(desired_legend_width(&code.langs, code.num.lines()));
+                let langs = code.counted_langs(loaded.hidden);
+                let total = loaded.value(SubKey::Lines, id) as usize;
+                desired_legend = desired_legend.max(desired_legend_width(&langs, total));
             }
         }
 

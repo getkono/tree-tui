@@ -36,6 +36,7 @@ use app::App;
 use cli::Command;
 use error::AppError;
 use karet_filetype::IconStyle;
+use model::Hidden;
 
 /// Parse the command line and run whichever command it names, returning the
 /// process exit code. The binary's `main` is a `#[tokio::main]` wrapper over this.
@@ -56,10 +57,10 @@ pub async fn run_cli() -> ExitCode {
             println!("{}", cli::usage());
             ExitCode::SUCCESS
         }
-        Ok(Command::Run { dir, icons }) => {
+        Ok(Command::Run { dir, icons, hide }) => {
             let _log_guard = logging::init();
             let icons = cli::resolve_icons(icons, std::env::var(cli::ICONS_ENV).ok().as_deref());
-            match run(dir, icons).await {
+            match run(dir, icons, hide).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     // Concise, chained message for expected errors; the
@@ -79,13 +80,14 @@ pub async fn run_cli() -> ExitCode {
 
 /// Validate the target directory, then run the TUI, restoring the terminal on
 /// every exit path.
-async fn run(dir: PathBuf, icons: IconStyle) -> color_eyre::Result<()> {
+async fn run(dir: PathBuf, icons: IconStyle, hide: Hidden) -> color_eyre::Result<()> {
     let root = validate_dir(&dir)?;
     let label = root_label(&dir, &root);
     tracing::info!(target = %root.display(), "tree starting");
 
     ui::theme::set_icon_style(icons);
     let mut app = App::new(root, label);
+    app.start_hidden = hide;
     // Images in the preview / reader use the Kitty graphics protocol where the
     // terminal speaks it and truecolor half-blocks everywhere else. Detection is
     // env-only — no stdin probe — so it never collides with crossterm's event

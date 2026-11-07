@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use tokei::LanguageType;
 
+use super::facet::{Hidden, TagBuckets, TagSet};
+
 /// Index into [`Tree::nodes`]. The arena is never reordered (only children
 /// lists are), so an id is a stable identity used to track selection.
 pub type NodeId = usize;
@@ -133,15 +135,67 @@ impl AddAssign for CodeNum {
     }
 }
 
-/// A node's code layer entry: totals, the per-language breakdown, and (for files)
-/// the dominant language used to color the file glyph.
+/// A node's code layer entry: line counts per language, each split by the
+/// tags its lines carry, and (for files) the language that colors its glyph.
+///
+/// The totals are derived rather than stored: a node holds a few languages at
+/// most, and one source of truth is what keeps the `lines` column, the
+/// language legend and the header in agreement under every facet filter.
 #[derive(Debug, Clone, Default)]
 pub struct CodeData {
-    pub num: CodeNum,
-    /// Per-language line counts (aggregated for dirs, per-file for files).
-    pub langs: BTreeMap<LanguageType, CodeNum>,
-    /// The dominant language of a file by line count (files only).
+    /// Per-language, per-tag-set line counts (aggregated for dirs).
+    pub langs: BTreeMap<LanguageType, TagBuckets>,
+    /// The language a file was detected as (files only).
     pub primary_lang: Option<LanguageType>,
+}
+
+impl CodeData {
+    /// A file's entry from its per-language counts, none of them tagged.
+    pub fn untagged(
+        langs: impl IntoIterator<Item = (LanguageType, CodeNum)>,
+        primary_lang: Option<LanguageType>,
+    ) -> Self {
+        Self {
+            langs: langs
+                .into_iter()
+                .map(|(lang, num)| (lang, TagBuckets::of(TagSet::EMPTY, num)))
+                .collect(),
+            primary_lang,
+        }
+    }
+
+    /// Every line, whatever its tags.
+    pub fn total(&self) -> CodeNum {
+        self.visible(TagSet::EMPTY)
+    }
+
+    /// The lines carrying none of the `hidden` tags.
+    pub fn visible(&self, hidden: TagSet) -> CodeNum {
+        self.langs
+            .values()
+            .fold(CodeNum::default(), |mut acc, buckets| {
+                acc += buckets.visible(hidden);
+                acc
+            })
+    }
+
+    /// Per language, the lines that count toward `lines` under `hidden`: the
+    /// hidden tags dropped and the hidden kinds zeroed. Languages left with no
+    /// lines are omitted.
+    pub fn counted_langs(&self, hidden: Hidden) -> BTreeMap<LanguageType, CodeNum> {
+        self.langs
+            .iter()
+            .map(|(&lang, buckets)| (lang, hidden.counted(buckets.visible(hidden.tags()))))
+            .filter(|(_, num)| num.lines() > 0)
+            .collect()
+    }
+
+    /// Add `other`'s lines to this entry (the bottom-up fold).
+    pub fn merge(&mut self, other: &CodeData) {
+        for (&lang, buckets) in &other.langs {
+            self.langs.entry(lang).or_default().merge(buckets);
+        }
+    }
 }
 
 /// Git churn over a window of history: lines added/deleted and how many commits
