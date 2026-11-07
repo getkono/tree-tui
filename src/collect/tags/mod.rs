@@ -13,6 +13,7 @@
 //! equally-tagged lines on its own and files it under that tag set.
 
 mod attr;
+pub mod generated;
 pub mod paths;
 
 use std::collections::{BTreeMap, HashMap};
