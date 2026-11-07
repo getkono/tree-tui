@@ -610,6 +610,19 @@ mod tests {
             view.contains("1 languages"),
             "Markdown had only blanks: {view}"
         );
+
+        // Facets act only on the code lens: elsewhere the count is unfiltered.
+        app.update(crate::action::Action::JumpLens(2));
+        let Screen::Loaded(l) = &app.screen else {
+            panic!("not loaded")
+        };
+        assert_eq!(l.active_lens, Lens::Size);
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(
+            view.contains("2 languages"),
+            "facets leaked off the code lens: {view}"
+        );
     }
 
     /// A row's language legend splits what its `lines` counts, so hiding a
