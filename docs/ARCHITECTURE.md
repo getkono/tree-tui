@@ -182,13 +182,15 @@ and comments. Line and blank totals never change.
   - In Zig, `test "…" { }` blocks are marked.
 
 **Generated** files are tagged whole (`tags::generated`). `.gitattributes` decides when it says
-anything, including an explicit *unset*, which overrides the other checks as it does on GitHub.
+anything, including an explicit *unset* (`-linguist-generated`), which overrides the other checks
+as it does on GitHub.
 Otherwise a lockfile name or a header marker marks the file.
 
 - **`.gitattributes`.** `linguist-generated`, or `=` any value but `false`, marks the file.
-  `-linguist-generated`, `!linguist-generated`, or `=false` unmarks it. The patterns are compiled
-  with `ignore`'s gitignore matcher, one per `.gitattributes`, with unset lines negated. The
-  deepest file with a matching line decides, and within a file the last matching line decides.
+  `-linguist-generated` or `=false` unmarks it. `!linguist-generated` leaves it unspecified, as in
+  git: it clears what earlier lines said, and the other checks decide. Each line's pattern is
+  compiled with `ignore`'s gitignore matcher. The deepest file with a matching line decides, and
+  within a file the last matching line decides.
   Directory patterns (`vendor/`) mark no files, as in git; `vendor/**` does.
 - **Lockfile name.** `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`,
   and others. tokei counts only some of them; the rest never reach the lens.
