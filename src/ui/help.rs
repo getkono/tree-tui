@@ -74,7 +74,10 @@ pub fn render(frame: &mut Frame, area: Rect) {
         ]));
     }
 
-    let width = (key_width + 40).min(area.width.saturating_sub(4) as usize) as u16;
+    // Fit the longest row: its display width plus the two borders and the
+    // horizontal padding, so no description is cut off when the screen allows.
+    let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    let width = (content_width + 4).min(area.width.saturating_sub(4) as usize) as u16;
     let height = (lines.len() + 2).min(area.height.saturating_sub(2) as usize) as u16;
     let [row] = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
@@ -117,5 +120,23 @@ mod tests {
             .expect("bench is a facet");
         assert!(rows[anchor + 1 + bench].1.contains("example"));
         assert_eq!(rows.len(), BINDINGS.len() + facets.len());
+    }
+
+    /// On a roomy screen the popup is wide enough that every row shows whole.
+    #[test]
+    fn every_row_fits_the_popup() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|frame| render(frame, frame.area())).unwrap();
+        let view = format!("{}", terminal.backend());
+        for (keys, description) in bindings() {
+            assert!(view.contains(&keys), "key {keys:?} cut off:\n{view}");
+            assert!(
+                view.contains(&description),
+                "row {description:?} cut off:\n{view}"
+            );
+        }
     }
 }
