@@ -506,7 +506,7 @@ mod tests {
         );
     }
 
-    /// The code lens shows one chip per live facet on the recap line; the rect
+    /// The code lens shows one chip per facet on the recap line; the rect
     /// recorded for each is where its text is drawn, and a click there
     /// toggles it and strikes it through on the next frame.
     #[test]
@@ -521,8 +521,8 @@ mod tests {
             Screen::Loaded(loaded) => loaded.facet_chips.clone(),
             _ => unreachable!(),
         };
-        let live: Vec<Facet> = Facet::live().collect();
-        assert_eq!(chips.iter().map(|&(_, f)| f).collect::<Vec<_>>(), live);
+        let facets: Vec<Facet> = Facet::ALL.into_iter().collect();
+        assert_eq!(chips.iter().map(|&(_, f)| f).collect::<Vec<_>>(), facets);
 
         let cell_text = |terminal: &Terminal<TestBackend>, rect: ratatui::layout::Rect| {
             (rect.x..rect.x + rect.width)
@@ -559,7 +559,7 @@ mod tests {
             _ => unreachable!(),
         };
         let mut app = sample_app();
-        let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        let mut narrow = Terminal::new(TestBackend::new(40, 16)).unwrap();
         narrow.draw(|frame| render(frame, &mut app)).unwrap();
         assert_eq!(chips(&app), 0, "no room beside the recap");
 
@@ -567,6 +567,42 @@ mod tests {
         app.update(crate::action::Action::JumpLens(2)); // size
         wide.draw(|frame| render(frame, &mut app)).unwrap();
         assert_eq!(chips(&app), 0);
+    }
+
+    /// On a big repository at 120 columns the labeled chips do not fit beside
+    /// the recap; the key-only form does, so the click targets survive.
+    #[test]
+    fn facet_chips_compact_before_they_vanish() {
+        let mut app = sample_app();
+        app.head_hash = Some("9ee4e1e".into());
+        let rust = LanguageType::Rust;
+        let big = CodeNum {
+            code: 900_000,
+            comments: 90_000,
+            blanks: 10_000,
+        };
+        app.on_layer(LayerResult::Code {
+            files: HashMap::from([(
+                PathBuf::from("src/main.rs"),
+                CodeData::untagged([(rust, big)], Some(rust)),
+            )]),
+            inaccurate: false,
+        });
+        let widths = |app: &App| match &app.screen {
+            Screen::Loaded(loaded) => loaded
+                .facet_chips
+                .iter()
+                .map(|(rect, _)| rect.width)
+                .collect::<Vec<_>>(),
+            _ => unreachable!(),
+        };
+        let mut terminal = Terminal::new(TestBackend::new(120, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert_eq!(widths(&app), vec![1; 5], "key-only chips at 120 columns");
+
+        let mut terminal = Terminal::new(TestBackend::new(180, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(widths(&app).iter().all(|&w| w > 1), "labeled when wide");
     }
 
     /// Hiding a kind takes it out of the header's `lines` and the legend's

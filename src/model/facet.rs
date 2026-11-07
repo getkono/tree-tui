@@ -59,20 +59,6 @@ impl Facet {
         }
     }
 
-    /// Whether the collector can produce this facet's lines yet. A facet that
-    /// is not live has no key, no chip, and is rejected by `--hide`.
-    pub fn is_live(self) -> bool {
-        match self {
-            Facet::Test | Facet::Generated | Facet::Comment | Facet::Blank => true,
-            Facet::BenchExample => false,
-        }
-    }
-
-    /// The facets the user can toggle, in display order.
-    pub fn live() -> impl Iterator<Item = Facet> {
-        Self::ALL.into_iter().filter(|facet| facet.is_live())
-    }
-
     /// The facet with this `--hide` name, if any.
     pub fn from_label(label: &str) -> Option<Facet> {
         Self::ALL.into_iter().find(|facet| facet.label() == label)

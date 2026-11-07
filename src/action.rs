@@ -90,7 +90,7 @@ pub fn map_key(key: KeyEvent) -> Action {
     }
 }
 
-/// The live facet toggled by `c`, if any.
+/// The facet toggled by `c`, if any.
 fn facet_for_key(c: char) -> Option<Facet> {
-    Facet::live().find(|facet| facet.key() == c)
+    Facet::ALL.into_iter().find(|facet| facet.key() == c)
 }

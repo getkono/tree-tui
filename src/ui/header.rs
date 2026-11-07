@@ -101,27 +101,41 @@ pub fn render(
 /// The gap kept between the recap and the facet chips.
 const CHIP_GAP: u16 = 3;
 
-/// The code lens's facet chips, right-aligned on `row`: one per live facet,
-/// lit while its lines count and struck through while hidden. Returns each
-/// chip's rect for click hit-testing, or nothing when the row is too narrow to
-/// hold them beside the recap's `recap_width` columns.
+/// The code lens's facet chips, right-aligned on `row`: one per facet, lit
+/// while its lines count and struck through while hidden. They are labeled
+/// (`t test`) when the row has room beside the recap's `recap_width` columns,
+/// key-only (`t`) when it has less, and absent when it has not even that.
+/// Returns each chip's rect for click hit-testing.
 fn render_facet_chips(
     frame: &mut Frame,
     hidden: Hidden,
     row: Rect,
     recap_width: u16,
 ) -> Vec<(Rect, Facet)> {
-    let chips: Vec<(Facet, String)> = Facet::live()
+    let labeled: Vec<(Facet, String)> = Facet::ALL
+        .into_iter()
         .map(|facet| (facet, format!("{} {}", facet.key(), facet.label())))
         .collect();
-    let width: u16 = chips
-        .iter()
-        .map(|(_, text)| text.len() as u16 + 1)
-        .sum::<u16>()
-        .saturating_sub(1);
-    if row.width < recap_width + CHIP_GAP + width {
+    let compact: Vec<(Facet, String)> = Facet::ALL
+        .into_iter()
+        .map(|facet| (facet, facet.key().to_string()))
+        .collect();
+    let width_of = |chips: &[(Facet, String)]| {
+        chips
+            .iter()
+            .map(|(_, text)| text.len() as u16 + 1)
+            .sum::<u16>()
+            .saturating_sub(1)
+    };
+    let fits = |chips: &[(Facet, String)]| row.width >= recap_width + CHIP_GAP + width_of(chips);
+    let chips = if fits(&labeled) {
+        labeled
+    } else if fits(&compact) {
+        compact
+    } else {
         return Vec::new();
-    }
+    };
+    let width = width_of(&chips);
 
     let mut x = row.x + row.width - width;
     let mut rects = Vec::with_capacity(chips.len());

@@ -1,5 +1,5 @@
-//! Line tags: which lines of a file are test code (and, later, generated or
-//! benchmark code).
+//! Line tags: which lines of a file are test code or benchmarks and examples
+//! (generated files are tagged by [`generated`]).
 //!
 //! A file is tagged two ways. **By path**, a whole file at once, from the test
 //! runners' naming conventions ([`paths`]). **In the file**, by syntax: the
@@ -102,8 +102,18 @@ impl Detector {
         Self::default()
     }
 
-    /// Tag the lines of `text`, the file `rel` detected as `lang`.
+    /// Tag the lines of `text`, the file `rel` detected as `lang`: test code
+    /// (and Rust `#[bench]`es) by path and in-file, and whole files under a
+    /// benchmark or example directory.
     pub fn tag(&mut self, lang: LanguageType, rel: &Path, text: &[u8]) -> Tagging {
+        let mut tagging = self.tag_code(lang, rel, text);
+        if paths::is_bench_path(rel) {
+            tagging.whole = tagging.whole.union(TagSet::BENCH);
+        }
+        tagging
+    }
+
+    fn tag_code(&mut self, lang: LanguageType, rel: &Path, text: &[u8]) -> Tagging {
         let grammar = match lang {
             LanguageType::Rust => Some("rust"),
             LanguageType::Zig => Some("zig"),
@@ -118,10 +128,11 @@ impl Detector {
         let Some(grammar) = grammar else {
             return Tagging::default();
         };
-        // Every marker read here has `test` in it but `#[quickcheck]`, so a
-        // file holding neither has nothing to find and skips the parse. A
-        // huge file (generated bindings, mostly) is not read in-file at all.
-        if !contains(text, b"test") && !contains(text, b"quickcheck") {
+        // Every marker read here has `test` in it but `#[quickcheck]` and
+        // `#[bench]`, so a file holding none of the three has nothing to find
+        // and skips the parse. A huge file (generated bindings, mostly) is not
+        // read in-file at all.
+        if !contains(text, b"test") && !contains(text, b"quickcheck") && !contains(text, b"bench") {
             return Tagging::default();
         }
         if text.len() > MAX_PARSE_BYTES {
@@ -317,17 +328,23 @@ fn rust(text: &str, rel: &Path, matches: &[QueryMatch], names: &[&str], rows: &R
         if attr::attribute_path(source).as_deref() == Some("path") {
             path_items.extend(item_of(attr));
         }
-        if !attr::marks_test(source) {
+        let tags = if attr::marks_test(source) {
+            TagSet::TEST
+        } else if attr::marks_bench(source) {
+            TagSet::BENCH
+        } else {
             continue;
-        }
+        };
         let Some(item) = item_of(attr) else {
             continue;
         };
-        test_items.push(item);
+        if tags == TagSet::TEST {
+            test_items.push(item);
+        }
         let start = trivia.extend_up(text, attr.0);
         let (first, _) = rows.of_span((start, item.1));
         let (_, last) = rows.of_span(item);
-        tagging.regions.push((first, last, TagSet::TEST));
+        tagging.regions.push((first, last, tags));
     }
 
     for &inner in &inners {

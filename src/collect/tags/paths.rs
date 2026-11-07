@@ -46,6 +46,30 @@ pub fn is_test_path(rel: &Path, in_file: bool) -> bool {
     components.iter().any(|dir| dirs.contains(dir)) || is_test_file_name(name)
 }
 
+/// Directory names that hold benchmarks or examples: Cargo's `benches/` and
+/// `examples/`, and the same names elsewhere.
+const BENCH_DIRS: &[&str] = &["benches", "bench", "benchmarks", "examples", "example"];
+
+/// Whether `rel` sits under a benchmark or example directory.
+///
+/// Only directories above the first `src` count: below it, `example` is a
+/// package name as often as not (`src/main/java/com/example/…` is every
+/// Spring and Android starter), and a Rust `src/…/example/` is a module.
+pub fn is_bench_path(rel: &Path) -> bool {
+    let mut components: Vec<&str> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+    components.pop(); // the file name
+    components
+        .iter()
+        .take_while(|&&dir| dir != "src")
+        .any(|dir| BENCH_DIRS.contains(dir))
+}
+
 fn is_test_file_name(name: &str) -> bool {
     let Some((stem, ext)) = name.rsplit_once('.') else {
         return false;
@@ -130,6 +154,34 @@ mod tests {
         ] {
             assert!(!is_test_path(Path::new(path), false), "{path}");
         }
+    }
+
+    #[test]
+    fn bench_and_example_directories() {
+        use super::is_bench_path;
+        for path in [
+            "benches/walk.rs",
+            "crates/a/examples/demo.rs",
+            "bench/x.go",
+            "benchmarks/run.py",
+            "example/main.go",
+        ] {
+            assert!(is_bench_path(Path::new(path)), "{path}");
+        }
+        for path in [
+            "benches",
+            "src/bench.rs",
+            "src/examples.rs",
+            "src/main.rs",
+            // Package names and modules below `src`.
+            "src/main/java/com/example/demo/DemoApplication.java",
+            "app/src/main/java/com/example/myapplication/MainActivity.kt",
+            "src/lr1/example/mod.rs",
+        ] {
+            assert!(!is_bench_path(Path::new(path)), "{path}");
+        }
+        // Above `src` still counts: a crate under an examples directory.
+        assert!(is_bench_path(Path::new("examples/demo/src/main.rs")));
     }
 
     /// For the languages read in-file only Cargo's `tests/` counts: a Rust
