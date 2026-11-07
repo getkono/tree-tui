@@ -48,7 +48,7 @@ fn bindings() -> Vec<(String, String)> {
             rows.extend(Facet::ALL.into_iter().map(|facet| {
                 (
                     facet.key().to_string(),
-                    format!("hide / show {} lines (or click)", facet.label()),
+                    format!("hide / show {} lines (or click)", facet.description()),
                 )
             }));
         }
@@ -110,6 +110,12 @@ mod tests {
             assert_eq!(keys, &facet.key().to_string());
             assert!(description.contains(facet.label()), "{description}");
         }
+        // The bench chip says only `bench`; its help row names examples too.
+        let bench = Facet::ALL
+            .iter()
+            .position(|&facet| facet == Facet::BenchExample)
+            .expect("bench is a facet");
+        assert!(rows[anchor + 1 + bench].1.contains("example"));
         assert_eq!(rows.len(), BINDINGS.len() + facets.len());
     }
 }

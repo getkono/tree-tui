@@ -48,6 +48,16 @@ impl Facet {
         }
     }
 
+    /// What the facet covers, spelled out for the help screen. Usually the
+    /// label; `bench` keeps its short label in the header chip and `--hide`,
+    /// but also hides `examples/`, so its help row says so.
+    pub fn description(self) -> &'static str {
+        match self {
+            Facet::BenchExample => "bench / example",
+            _ => self.label(),
+        }
+    }
+
     /// The key that toggles it.
     pub fn key(self) -> char {
         match self {
