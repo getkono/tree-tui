@@ -48,9 +48,12 @@ is instant, and you never pay for git history unless you ask for it.
 - **Navigate & drill in** — expand/collapse, jump to parent/child, page, go to top/bottom.
 - **Sort** — by the active lens's columns (or by name / file count); reverse on demand.
 - **Declutter** — `z` hides rows that are zero under the active lens (e.g. non-code files in `code`).
-- **Line facets** — in `code`, hide kinds of lines from the `lines` total: `c` comments, `b` blanks
-  (or click their chips in the header, or start with `--hide comment,blank`). Every figure follows
-  — totals, share, sort, the language legend — and nothing is recounted.
+- **Line facets** — in `code`, hide kinds of lines: `t` test code, `c` comments, `b` blanks (or
+  click their chips in the header, or start with `--hide test,blank`). Every figure follows
+  — totals, share, sort, the language legend — and nothing is recounted. Test code is found by
+  path (`tests/`, `*_test.go`, `test_*.py`, `*.spec.ts`, …) and, in Rust and Zig, in the file:
+  `#[cfg(test)]` and `#[test]`-style items, the files of `#[cfg(test)] mod tests;`, and `test`
+  blocks.
 - **Filter** — live name filter that reveals matches together with their parent path.
 - **The whole row** — every row carries its own breakdown: the lens's numbers plus the file count,
   the on-disk size, and the row's share of the tree under the active lens.
@@ -92,7 +95,7 @@ mise run install   # cargo install --path . --force  →  installs the `tree` bi
 ```bash
 tree [dir]           # explore [dir] (default: .) through swappable lenses
 tree --icons <tier>  # glyph tier: unicode (default), nerd, or ascii
-tree --hide <list>   # start with line facets hidden in the code lens: comment, blank
+tree --hide <list>   # start with line facets hidden in the code lens: test, comment, blank
 tree -V, --version   # print version + build info (commit, build time, profile, rustc, target)
 tree -h, --help      # print usage
 ```
@@ -121,7 +124,7 @@ characters. Set `TREE_TUI_ICONS` to make the choice stick.
 | `s` | cycle the sort column (within the lens) |
 | `r` | reverse the sort order |
 | `z` | hide rows that are zero under the active lens |
-| `c` / `b` | hide / show comment / blank lines in the code lens (or click the header chip) |
+| `t` / `c` / `b` | hide / show test / comment / blank lines in the code lens (or click the header chip) |
 | `p` / `Tab` | toggle the preview pane |
 | drag | drag the divider between the tree and the preview to resize them |
 | `/` | filter by name (`Esc` clears) |

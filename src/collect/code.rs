@@ -34,7 +34,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokei::{CodeStats, Config, LanguageType};
 
-use crate::model::{CodeData, CodeNum};
+use super::tags::{Detector, ModulePath, Tagging};
+use crate::model::{CodeData, CodeNum, TagBuckets, TagSet};
 
 /// One file's line counts: the totals, and how they split across the
 /// languages the file holds (its own, plus any embedded ones).
@@ -52,6 +53,7 @@ pub fn collect_code(root: &Path, files: &[PathBuf]) -> (HashMap<PathBuf, CodeDat
     let next = AtomicUsize::new(0);
     let inaccurate = AtomicBool::new(false);
     let merged: Mutex<HashMap<PathBuf, CodeData>> = Mutex::new(HashMap::new());
+    let test_modules: Mutex<Vec<ModulePath>> = Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(files.len().max(1));
@@ -60,6 +62,8 @@ pub fn collect_code(root: &Path, files: &[PathBuf]) -> (HashMap<PathBuf, CodeDat
         for _ in 0..workers {
             scope.spawn(|| {
                 let mut local = Vec::new();
+                let mut modules = Vec::new();
+                let mut detector = Detector::new();
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     let Some(rel) = files.get(i) else { break };
@@ -77,8 +81,17 @@ pub fn collect_code(root: &Path, files: &[PathBuf]) -> (HashMap<PathBuf, CodeDat
                     };
                     match read_decoded(&path) {
                         Ok(text) => {
-                            let counts = count_file(lang, &text, &config);
-                            local.push((rel.clone(), code_data(lang, counts)));
+                            let tagging = detector.tag(lang, rel, &text);
+                            let langs = count_tagged(lang, &text, &config, &tagging);
+                            modules.extend(tagging.test_modules);
+                            // Colored by the detected language, never by an
+                            // embedded one: a README full of fenced Rust is
+                            // still Markdown.
+                            let data = CodeData {
+                                langs,
+                                primary_lang: Some(lang),
+                            };
+                            local.push((rel.clone(), data));
                         }
                         Err(error) => {
                             tracing::debug!(path = %path.display(), %error, "unreadable source file");
@@ -90,14 +103,36 @@ pub fn collect_code(root: &Path, files: &[PathBuf]) -> (HashMap<PathBuf, CodeDat
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .extend(local);
+                test_modules
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend(modules);
             });
         }
     });
 
-    let files = merged
+    let mut files = merged
         .into_inner()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let test_modules = test_modules
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    retag_test_modules(&mut files, &test_modules);
     (files, inaccurate.into_inner())
+}
+
+/// The second pass: a Rust module declared test-only in one file
+/// (`#[cfg(test)] mod tests;`) makes its own file test code, whole — which
+/// only the declaring file can tell.
+fn retag_test_modules(files: &mut HashMap<PathBuf, CodeData>, test_modules: &[ModulePath]) {
+    if test_modules.is_empty() {
+        return;
+    }
+    for (path, data) in files.iter_mut() {
+        if test_modules.iter().any(|module| module.contains(path)) {
+            data.retag(TagSet::TEST);
+        }
+    }
 }
 
 /// Read a file the way tokei does: BOM-sniffed, so UTF-16 sources decode to
@@ -111,11 +146,55 @@ fn read_decoded(path: &Path) -> std::io::Result<Vec<u8>> {
     Ok(text)
 }
 
-/// A file's code-layer entry. Its glyph is colored by the language it was
-/// detected as, never by an embedded one — a README full of fenced Rust is
-/// still Markdown.
-fn code_data(lang: LanguageType, counts: FileCounts) -> CodeData {
-    CodeData::untagged(counts.langs, Some(lang))
+/// Count `text` as `lang` with its lines tagged by `tagging`: each run of
+/// equally-tagged lines is counted on its own (see [`count_file`]) and filed
+/// under its tags, so the buckets add up to the file.
+///
+/// A run boundary is an item boundary — an attribute or a `test` block starts
+/// a run, an item's last line ends one — so tokei usually starts each run
+/// where it was in place: outside any comment or string. Not always: a block
+/// comment or string opened after an item on its last line runs on into the
+/// next run, which tokei then starts fresh. Line and blank totals never
+/// change; such a seam can move lines between code and comments.
+pub fn count_tagged(
+    lang: LanguageType,
+    text: &[u8],
+    config: &Config,
+    tagging: &Tagging,
+) -> BTreeMap<LanguageType, TagBuckets> {
+    let mut langs: BTreeMap<LanguageType, TagBuckets> = BTreeMap::new();
+    let mut file = |tags: TagSet, run: &[u8]| {
+        for (lang, num) in count_file(lang, run, config).langs {
+            langs.entry(lang).or_default().add(tags, num);
+        }
+    };
+    if tagging.regions.is_empty() || lang == LanguageType::Jupyter {
+        file(tagging.whole, text);
+        return langs;
+    }
+
+    let rows = lines(text).count();
+    let mut row_tags = vec![tagging.whole; rows];
+    for &(first, last, tags) in &tagging.regions {
+        for row_tag in row_tags.iter_mut().take(last + 1).skip(first) {
+            *row_tag = row_tag.union(tags);
+        }
+    }
+    let mut run = Vec::new();
+    let mut run_tags = None;
+    for (line, tags) in lines(text).zip(row_tags) {
+        if run_tags.is_some_and(|current| current != tags) {
+            file(run_tags.unwrap_or_default(), &run);
+            run.clear();
+        }
+        run_tags = Some(tags);
+        run.extend_from_slice(line);
+        run.push(b'\n');
+    }
+    if let Some(tags) = run_tags {
+        file(tags, &run);
+    }
+    langs
 }
 
 /// Count one file's lines as `lang`.
@@ -324,6 +403,7 @@ mod tests {
 
     use super::{FileCounts, count_file, is_blank, physical_lines};
     use crate::model::CodeNum;
+    use crate::model::{CodeData, TagSet};
 
     /// A scratch directory for collector tests.
     struct TempRoot(PathBuf);
@@ -725,6 +805,165 @@ mod tests {
         assert_eq!(langs[&rust], num(3, 3, 0));
         super::reconcile(rust, &mut langs, 2);
         assert_eq!(langs[&rust], num(2, 0, 0));
+    }
+
+    // --- Tagged counting.
+
+    fn tagged(lang: LanguageType, text: &str, tagging: &super::Tagging) -> CodeData {
+        CodeData {
+            langs: super::count_tagged(lang, text.as_bytes(), &Config::default(), tagging),
+            primary_lang: Some(lang),
+        }
+    }
+
+    #[test]
+    fn tagged_runs_are_filed_under_their_tags() {
+        let text = "\
+fn shipped() {}
+
+#[cfg(test)]
+mod tests {
+    // c
+
+    fn t() {}
+}
+";
+        let tagging = super::Tagging {
+            regions: vec![(2, 7, TagSet::TEST)],
+            ..Default::default()
+        };
+        let data = tagged(LanguageType::Rust, text, &tagging);
+        assert_eq!(data.total(), num(5, 1, 2));
+        assert_eq!(data.visible(TagSet::TEST), num(1, 0, 1));
+        // This file has no seam inside a comment or string, so untagged it
+        // counts the same.
+        assert_eq!(count(LanguageType::Rust, text).total, data.total());
+    }
+
+    /// A whole-file tag holds on every line, including the lines of regions
+    /// that carry another tag (a `#![cfg(test)]` file with `#[test]`s in it).
+    #[test]
+    fn whole_file_tags_hold_alongside_regions() {
+        let tagging = super::Tagging {
+            whole: TagSet::TEST,
+            regions: vec![(1, 1, TagSet::BENCH)],
+            ..Default::default()
+        };
+        let data = tagged(
+            LanguageType::Rust,
+            "fn a() {}\nfn b() {}\nfn c() {}\n",
+            &tagging,
+        );
+        assert_eq!(data.visible(TagSet::TEST), CodeNum::default());
+        assert_eq!(data.visible(TagSet::BENCH).code, 2);
+    }
+
+    /// A seam inside a block comment opened after an item moves lines between
+    /// code and comments, never the totals.
+    #[test]
+    fn a_seam_inside_a_comment_keeps_the_totals() {
+        let text = "#[test]\nfn t() {} /* c\n more\n */\nfn b() {}\n";
+        let tagging = super::Tagging {
+            regions: vec![(0, 1, TagSet::TEST)],
+            ..Default::default()
+        };
+        let data = tagged(LanguageType::Rust, text, &tagging);
+        assert_eq!(data.total().lines(), 5);
+        assert_eq!(count(LanguageType::Rust, text).total.lines(), 5);
+    }
+
+    #[test]
+    fn a_whole_file_tag_files_every_line() {
+        let tagging = super::Tagging {
+            whole: TagSet::TEST,
+            ..Default::default()
+        };
+        let data = tagged(LanguageType::Rust, "fn a() {}\n\n// c\n", &tagging);
+        assert_eq!(data.total(), num(1, 1, 1));
+        assert_eq!(data.visible(TagSet::TEST), CodeNum::default());
+    }
+
+    proptest! {
+        /// However lines are tagged, the buckets add up to the file: every
+        /// physical line once, and every blank line as a blank.
+        #[test]
+        fn tagged_buckets_add_up(
+            text in source(LanguageType::Rust),
+            regions in prop::collection::vec((0usize..40, 0usize..8, any::<bool>()), 0..4),
+        ) {
+            let tagging = super::Tagging {
+                regions: regions
+                    .into_iter()
+                    .map(|(first, len, bench)| {
+                        let tags = if bench { TagSet::BENCH } else { TagSet::TEST };
+                        (first, first + len, tags)
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let data = tagged(LanguageType::Rust, &text, &tagging);
+            let bytes = text.as_bytes();
+            prop_assert_eq!(data.total().lines(), physical_lines(bytes));
+            let blank = super::lines(bytes)
+                .filter(|l| is_blank(LanguageType::Rust, l))
+                .count();
+            prop_assert_eq!(data.total().blanks, blank);
+        }
+    }
+
+    /// `#[cfg(test)] mod tests;` makes `tests.rs` (and anything under
+    /// `tests/`) test code, whole; the declaring file is tagged in place.
+    #[test]
+    fn out_of_line_test_modules_are_tagged_whole() {
+        let root = TempRoot::new("testmods");
+        root.write("src/lib.rs", "pub fn a() {}\n\n#[cfg(test)]\nmod tests;\n");
+        root.write("src/tests.rs", "use super::*;\n\n#[test]\nfn t() {}\n");
+        root.write("src/tests/helpers.rs", "pub fn h() {}\n");
+        root.write("src/other.rs", "pub fn o() {}\n");
+        let files: Vec<PathBuf> = [
+            "src/lib.rs",
+            "src/tests.rs",
+            "src/tests/helpers.rs",
+            "src/other.rs",
+        ]
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+        let (counted, _) = super::collect_code(&root.0, &files);
+        let visible = |path: &str| counted[Path::new(path)].visible(TagSet::TEST).lines();
+        assert_eq!(
+            visible("src/lib.rs"),
+            2,
+            "`pub fn a` and the blank after it"
+        );
+        assert_eq!(visible("src/tests.rs"), 0);
+        assert_eq!(visible("src/tests/helpers.rs"), 0);
+        assert_eq!(visible("src/other.rs"), 1);
+        assert_eq!(counted[Path::new("src/tests.rs")].total().lines(), 4);
+    }
+
+    #[test]
+    fn test_named_files_are_tagged_whole() {
+        let root = TempRoot::new("testnames");
+        root.write("pkg/walk_test.go", "package pkg\n\nfunc TestWalk() {}\n");
+        root.write("pkg/walk.go", "package pkg\n");
+        let files = [
+            PathBuf::from("pkg/walk_test.go"),
+            PathBuf::from("pkg/walk.go"),
+        ];
+        let (counted, _) = super::collect_code(&root.0, &files);
+        assert_eq!(
+            counted[Path::new("pkg/walk_test.go")]
+                .visible(TagSet::TEST)
+                .lines(),
+            0
+        );
+        assert_eq!(
+            counted[Path::new("pkg/walk.go")]
+                .visible(TagSet::TEST)
+                .lines(),
+            1
+        );
     }
 
     // --- The collector.
