@@ -14,7 +14,8 @@ use ratatui::widgets::{Row, TableState};
 use crate::action::{self, Action};
 use crate::collect::LayerResult;
 use crate::model::{
-    self, ChurnData, CodeData, Layer, Lens, NodeId, NodeKind, SortDir, StatusData, SubKey, Tree,
+    self, ChurnData, CodeData, CodeNum, Facet, Hidden, Layer, Lens, NodeId, NodeKind, SortDir,
+    StatusData, SubKey, Tree,
 };
 use crate::scan::ScanOutcome;
 use crate::ui::preview::Preview;
@@ -204,6 +205,12 @@ pub struct Loaded {
     /// Whether the (computed) code layer could not read some source file, so
     /// its lines are missing from the totals.
     pub inaccurate: bool,
+    /// The line facets hidden from the code lens. View state over the cached
+    /// code layer, which holds every facet's lines: toggling one re-sorts and
+    /// redraws, and never recomputes. Survives rescans like `excluded` does.
+    pub hidden: Hidden,
+    /// The header's facet chips from the last render, for mouse hit-testing.
+    pub facet_chips: Vec<(Rect, Facet)>,
     /// Bumped on every content rebuild; part of the row-cache key so navigation
     /// frames reuse the built rows but any content change rebuilds them.
     pub rebuild_rev: u64,
@@ -242,6 +249,8 @@ pub struct App {
     /// Short hash of the repository's current `HEAD`, shown in the header. `None`
     /// outside a git repository or on an unborn `HEAD`.
     pub head_hash: Option<String>,
+    /// The facets hidden when the tree first loads (`--hide`).
+    pub start_hidden: Hidden,
 }
 
 impl App {
@@ -260,6 +269,7 @@ impl App {
             pending_capture: None,
             repo: false,
             head_hash: None,
+            start_hidden: Hidden::default(),
         }
     }
 
@@ -317,6 +327,7 @@ impl App {
         self.repo = outcome.repo;
         self.head_hash = outcome.head;
         let mut loaded = Loaded::new(outcome.tree, outcome.duration);
+        loaded.hidden = self.start_hidden;
         loaded.apply_sort();
         // The default lens (code) reads a layer; kick off its computation.
         loaded.mark_computing(loaded.active_lens);
@@ -590,6 +601,10 @@ impl App {
             // any drag still marked in flight is stale by the time a new press
             // arrives. Clearing here is what keeps one from wedging on.
             loaded.split_drag = None;
+            if let Some(facet) = loaded.facet_chip_at(col, row) {
+                loaded.toggle_facet(facet);
+                return;
+            }
             if let Some(preview) = loaded.panes.preview
                 && loaded.panes.on_divider(col, row)
             {
@@ -832,6 +847,8 @@ impl Loaded {
             sort_key: Lens::Code.default_sub_key(),
             sort_dir: SortDir::Desc,
             inaccurate: false,
+            hidden: Hidden::default(),
+            facet_chips: Vec::new(),
             rebuild_rev: 0,
             row_cache: None,
             code: Layer::NotComputed,
@@ -917,15 +934,24 @@ impl Loaded {
 
     /// The value of `key` for node `id`, reading the node fields or the relevant
     /// cached layer (zero until that layer is `Ready`).
+    ///
+    /// The code keys read the layer through [`Loaded::hidden`]: every column
+    /// drops lines carrying a hidden tag, and `lines` also drops the hidden
+    /// kinds (comments, blanks) — whose own columns keep showing them. Share,
+    /// sort, zero-hiding and exclusion all read through here, so they follow.
     pub fn value(&self, key: SubKey, id: NodeId) -> u128 {
+        let code = || {
+            self.code_at(id)
+                .map_or_else(CodeNum::default, |c| c.visible(self.hidden.tags()))
+        };
         match key {
             SubKey::Bytes => self.tree.nodes[id].bytes as u128,
             SubKey::Files => self.tree.nodes[id].files as u128,
             SubKey::Name => 0,
-            SubKey::Lines => self.code_at(id).map_or(0, |c| c.num.lines()) as u128,
-            SubKey::Code => self.code_at(id).map_or(0, |c| c.num.code) as u128,
-            SubKey::Comments => self.code_at(id).map_or(0, |c| c.num.comments) as u128,
-            SubKey::Blanks => self.code_at(id).map_or(0, |c| c.num.blanks) as u128,
+            SubKey::Lines => self.hidden.counted(code()).lines() as u128,
+            SubKey::Code => code().code as u128,
+            SubKey::Comments => code().comments as u128,
+            SubKey::Blanks => code().blanks as u128,
             SubKey::Added => self.churn_at(id).map_or(0, |c| c.added) as u128,
             SubKey::Deleted => self.churn_at(id).map_or(0, |c| c.deleted) as u128,
             SubKey::Churn => self.churn_at(id).map_or(0, |c| c.churn()) as u128,
@@ -935,6 +961,25 @@ impl Loaded {
             SubKey::StatusDeleted => self.status_at(id).map_or(0, |s| s.deleted) as u128,
             SubKey::StatusTotal => self.status_at(id).map_or(0, |s| s.total()) as u128,
         }
+    }
+
+    /// Hide or show a line facet (code lens only, where its chips and figures
+    /// are). Only the view moves: the values re-read the
+    /// cached layer, so the rows re-sort and rebuild and nothing recomputes.
+    fn toggle_facet(&mut self, facet: Facet) {
+        if !facet.is_live() || self.active_lens != Lens::Code {
+            return;
+        }
+        self.hidden.toggle(facet);
+        self.apply_sort();
+    }
+
+    /// The facet chip under a screen cell, if any.
+    fn facet_chip_at(&self, col: u16, row: u16) -> Option<Facet> {
+        self.facet_chips
+            .iter()
+            .find(|(rect, _)| contains(*rect, col, row))
+            .map(|&(_, facet)| facet)
     }
 
     /// The active lens's headline value for node `id` (the bar / zero-test value).
@@ -1301,6 +1346,7 @@ impl Loaded {
                 self.hide_zeros = !self.hide_zeros;
                 self.rebuild();
             }
+            Action::ToggleFacet(facet) => self.toggle_facet(facet),
             Action::ToggleExclude => {
                 if let Some(id) = self.selected_id() {
                     let path = self.tree.nodes[id].rel_path.clone();
@@ -1467,6 +1513,7 @@ mod tests {
     use crate::model::{CodeData, CodeNum, build_skeleton};
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use tokei::LanguageType;
 
     /// The Kitty flush must find nothing to draw while the help overlay is up:
     /// a placement sits above the cell buffer, so it would cover the popup.
@@ -2536,14 +2583,17 @@ mod tests {
     fn on_layer_caches_code_and_sorts_by_lines() {
         let mut app = sample_app();
         let mut files = HashMap::new();
-        let main = CodeData {
-            num: CodeNum {
-                code: 100,
-                comments: 0,
-                blanks: 0,
-            },
-            ..Default::default()
-        };
+        let main = CodeData::untagged(
+            [(
+                LanguageType::Rust,
+                CodeNum {
+                    code: 100,
+                    comments: 0,
+                    blanks: 0,
+                },
+            )],
+            None,
+        );
         files.insert(PathBuf::from("src/main.rs"), main);
         app.on_layer(LayerResult::Code {
             files,
@@ -2656,14 +2706,17 @@ mod tests {
         let mut files = HashMap::new();
         files.insert(
             PathBuf::from("src/main.rs"),
-            CodeData {
-                num: CodeNum {
-                    code: 10,
-                    comments: 0,
-                    blanks: 0,
-                },
-                ..Default::default()
-            },
+            CodeData::untagged(
+                [(
+                    LanguageType::Rust,
+                    CodeNum {
+                        code: 10,
+                        comments: 0,
+                        blanks: 0,
+                    },
+                )],
+                None,
+            ),
         );
         app.on_layer(LayerResult::Code {
             files,
@@ -2952,5 +3005,275 @@ mod tests {
             loaded.preview_for.is_none(),
             "the note must be rebuilt: its text is the chained display name"
         );
+    }
+
+    // --- Line facets.
+
+    fn lines(code: usize, comments: usize, blanks: usize) -> CodeNum {
+        CodeNum {
+            code,
+            comments,
+            blanks,
+        }
+    }
+
+    /// A loaded app with the code layer ready:
+    /// - `src/a.rs`: 10 code, 50 comments, 0 blanks (60 lines)
+    /// - `src/b.rs`: 30 code (30 lines)
+    /// - `notes.md`: 5 blanks only
+    fn facet_app() -> App {
+        let files = vec![
+            (PathBuf::from("src/a.rs"), 600),
+            (PathBuf::from("src/b.rs"), 300),
+            (PathBuf::from("notes.md"), 5),
+        ];
+        let tree = build_skeleton(&files, &[PathBuf::from("src")], "proj".into());
+        let mut app = App::new(PathBuf::from("/proj"), "proj".into());
+        app.on_scan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+        app.pending_compute = None;
+        let rust = LanguageType::Rust;
+        let markdown = LanguageType::Markdown;
+        let files = HashMap::from([
+            (
+                PathBuf::from("src/a.rs"),
+                CodeData::untagged([(rust, lines(10, 50, 0))], Some(rust)),
+            ),
+            (
+                PathBuf::from("src/b.rs"),
+                CodeData::untagged([(rust, lines(30, 0, 0))], Some(rust)),
+            ),
+            (
+                PathBuf::from("notes.md"),
+                CodeData::untagged([(markdown, lines(0, 0, 5))], Some(markdown)),
+            ),
+        ]);
+        app.on_layer(LayerResult::Code {
+            files,
+            inaccurate: false,
+        });
+        app.update(Action::ExpandAll);
+        app
+    }
+
+    fn loaded(app: &App) -> &Loaded {
+        match &app.screen {
+            Screen::Loaded(loaded) => loaded,
+            _ => panic!("not loaded"),
+        }
+    }
+
+    fn value_of(app: &App, key: SubKey, name: &str) -> u128 {
+        let loaded = loaded(app);
+        let id = loaded
+            .tree
+            .nodes
+            .iter()
+            .position(|n| n.name == name)
+            .unwrap_or_else(|| panic!("no node {name}"));
+        loaded.effective_value(key, id)
+    }
+
+    fn visible_names(app: &App) -> Vec<String> {
+        let loaded = loaded(app);
+        loaded
+            .visible
+            .iter()
+            .map(|&id| loaded.tree.nodes[id].name.clone())
+            .collect()
+    }
+
+    fn char_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn hiding_comments_drops_them_from_lines_but_not_their_column() {
+        let mut app = facet_app();
+        assert_eq!(root_effective(&app, SubKey::Lines), 95);
+
+        app.handle_key(char_key('c'));
+        assert!(loaded(&app).hidden.contains(Facet::Comment));
+        assert_eq!(root_effective(&app, SubKey::Lines), 45);
+        assert_eq!(value_of(&app, SubKey::Lines, "a.rs"), 10);
+        assert_eq!(
+            root_effective(&app, SubKey::Comments),
+            50,
+            "the column keeps it"
+        );
+        assert_eq!(root_effective(&app, SubKey::Code), 40);
+
+        app.handle_key(char_key('b'));
+        assert_eq!(root_effective(&app, SubKey::Lines), 40);
+        assert_eq!(root_effective(&app, SubKey::Blanks), 5);
+
+        // A second press restores the exact figures.
+        app.handle_key(char_key('c'));
+        app.handle_key(char_key('b'));
+        assert_eq!(root_effective(&app, SubKey::Lines), 95);
+    }
+
+    /// The layer caches every facet's lines: a toggle never asks for a
+    /// recompute and leaves the layer `Ready`.
+    #[test]
+    fn toggling_a_facet_does_not_recompute() {
+        let mut app = facet_app();
+        app.handle_key(char_key('c'));
+        assert_eq!(app.pending_compute, None);
+        assert!(loaded(&app).code.ready().is_some());
+    }
+
+    #[test]
+    fn hiding_a_kind_resorts_the_rows() {
+        let mut app = facet_app();
+        let pos = |app: &App, name: &str| visible_names(app).iter().position(|n| n == name);
+        assert!(pos(&app, "a.rs") < pos(&app, "b.rs"), "60 lines before 30");
+        app.handle_key(char_key('c'));
+        assert!(pos(&app, "b.rs") < pos(&app, "a.rs"), "30 lines before 10");
+    }
+
+    #[test]
+    fn zero_hiding_follows_the_facets() {
+        let mut app = facet_app();
+        app.update(Action::ToggleZeros);
+        assert!(visible_names(&app).contains(&"notes.md".to_string()));
+        app.handle_key(char_key('b'));
+        assert!(
+            !visible_names(&app).contains(&"notes.md".to_string()),
+            "a blanks-only file has no lines left"
+        );
+    }
+
+    #[test]
+    fn facets_combine_with_exclusion() {
+        let mut app = facet_app();
+        select(&mut app, "b.rs");
+        app.update(Action::ToggleExclude);
+        assert_eq!(root_effective(&app, SubKey::Lines), 65);
+        app.handle_key(char_key('c'));
+        assert_eq!(root_effective(&app, SubKey::Lines), 15);
+    }
+
+    #[test]
+    fn hidden_facets_survive_a_rescan() {
+        let mut app = facet_app();
+        app.handle_key(char_key('c'));
+        let tree = build_skeleton(
+            &[
+                (PathBuf::from("src/a.rs"), 600),
+                (PathBuf::from("src/c.rs"), 1),
+            ],
+            &[PathBuf::from("src")],
+            "proj".into(),
+        );
+        app.on_rescan(ScanOutcome {
+            tree,
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+        assert!(loaded(&app).hidden.contains(Facet::Comment));
+    }
+
+    #[test]
+    fn the_start_state_comes_from_the_app() {
+        let mut app = App::new(PathBuf::from("/p"), "p".into());
+        app.start_hidden.insert(Facet::Blank);
+        app.on_scan(ScanOutcome {
+            tree: build_skeleton(&[(PathBuf::from("a.rs"), 1)], &[], "p".into()),
+            duration: Duration::ZERO,
+            repo: false,
+            head: None,
+        });
+        assert!(loaded(&app).hidden.contains(Facet::Blank));
+        assert!(!loaded(&app).hidden.contains(Facet::Comment));
+    }
+
+    /// Only facets the collector can produce answer to a key; the rest stay
+    /// unbound until it can.
+    #[test]
+    fn only_live_facets_have_keys() {
+        for facet in Facet::ALL {
+            let action = action::map_key(char_key(facet.key()));
+            if facet.is_live() {
+                assert_eq!(action, Action::ToggleFacet(facet));
+            } else {
+                assert_eq!(action, Action::None, "{facet:?} is not live yet");
+            }
+        }
+        let mut app = facet_app();
+        app.update(Action::ToggleFacet(Facet::Test));
+        assert!(loaded(&app).hidden.is_empty());
+    }
+
+    /// Hiding a *tag* drops its lines from every code column and from the
+    /// per-language split, not just from `lines`. (No detector tags lines yet,
+    /// so the layer and the hidden set are built by hand.)
+    #[test]
+    fn hiding_a_tag_drops_its_lines_from_every_column() {
+        use crate::model::{TagBuckets, TagSet};
+        let mut app = facet_app();
+        let rust = LanguageType::Rust;
+        let markdown = LanguageType::Markdown;
+        let mut rust_buckets = TagBuckets::of(TagSet::EMPTY, lines(10, 2, 1));
+        rust_buckets.add(TagSet::TEST, lines(20, 4, 3));
+        let tagged = CodeData {
+            langs: [
+                (rust, rust_buckets),
+                (markdown, TagBuckets::of(TagSet::TEST, lines(0, 7, 0))),
+            ]
+            .into(),
+            primary_lang: Some(rust),
+        };
+        app.on_layer(LayerResult::Code {
+            files: HashMap::from([(PathBuf::from("src/a.rs"), tagged)]),
+            inaccurate: false,
+        });
+        assert_eq!(value_of(&app, SubKey::Lines, "a.rs"), 47);
+
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.hidden.insert(Facet::Test);
+        }
+        assert_eq!(value_of(&app, SubKey::Lines, "a.rs"), 13);
+        assert_eq!(value_of(&app, SubKey::Code, "a.rs"), 10);
+        assert_eq!(value_of(&app, SubKey::Comments, "a.rs"), 2);
+        assert_eq!(value_of(&app, SubKey::Blanks, "a.rs"), 1);
+        assert_eq!(root_effective(&app, SubKey::Lines), 13);
+
+        let loaded = loaded(&app);
+        let id = loaded.tree.index[Path::new("src/a.rs")];
+        let langs = loaded.code_at(id).unwrap().counted_langs(loaded.hidden);
+        assert_eq!(
+            langs.into_iter().collect::<Vec<_>>(),
+            vec![(rust, lines(10, 2, 1))],
+            "Markdown held only test lines"
+        );
+    }
+
+    /// The facets belong to the code lens: elsewhere their keys do nothing.
+    #[test]
+    fn facet_keys_do_nothing_outside_the_code_lens() {
+        let mut app = facet_app();
+        app.update(Action::JumpLens(2)); // size
+        app.handle_key(char_key('c'));
+        assert!(loaded(&app).hidden.is_empty());
+    }
+
+    #[test]
+    fn clicking_a_facet_chip_toggles_it() {
+        let mut app = facet_app();
+        if let Screen::Loaded(loaded) = &mut app.screen {
+            loaded.facet_chips = vec![(Rect::new(50, 2, 9, 1), Facet::Comment)];
+        }
+        app.handle_click(55, 2);
+        assert!(loaded(&app).hidden.contains(Facet::Comment));
+        app.handle_click(49, 2); // just left of the chip
+        assert!(loaded(&app).hidden.contains(Facet::Comment));
+        app.handle_click(58, 2);
+        assert!(!loaded(&app).hidden.contains(Facet::Comment));
     }
 }

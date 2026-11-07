@@ -2,11 +2,13 @@
 //! cached per-lens metric layers.
 
 mod build;
+mod facet;
 mod lens;
 mod node;
 pub mod view;
 
 pub use build::{aggregate, aggregate_code, build_skeleton};
+pub use facet::{Facet, Hidden, TagBuckets, TagSet};
 pub use lens::{ColumnFormat, ColumnSpec, Lens, Rank, SubKey, Tint};
 pub use node::{
     ChurnData, CodeData, CodeNum, Layer, NodeId, NodeKind, SortDir, StatusData, Tree, TreeNode,
