@@ -3171,7 +3171,7 @@ mod tests {
             }
         }
         let mut app = facet_app();
-        app.update(Action::ToggleFacet(Facet::Test));
+        app.update(Action::ToggleFacet(Facet::Generated));
         assert!(loaded(&app).hidden.is_empty());
     }
 

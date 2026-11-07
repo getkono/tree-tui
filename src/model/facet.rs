@@ -63,8 +63,8 @@ impl Facet {
     /// is not live has no key, no chip, and is rejected by `--hide`.
     pub fn is_live(self) -> bool {
         match self {
-            Facet::Comment | Facet::Blank => true,
-            Facet::Test | Facet::Generated | Facet::BenchExample => false,
+            Facet::Test | Facet::Comment | Facet::Blank => true,
+            Facet::Generated | Facet::BenchExample => false,
         }
     }
 
@@ -187,6 +187,14 @@ impl TagBuckets {
         match self.0.binary_search_by_key(&tags, |&(t, _)| t) {
             Ok(i) => self.0[i].1 += num,
             Err(i) => self.0.insert(i, (tags, num)),
+        }
+    }
+
+    /// File every bucket under its tags plus `tags`, merging buckets that
+    /// meet.
+    pub fn retag(&mut self, tags: TagSet) {
+        for (bucket, num) in std::mem::take(&mut self.0) {
+            self.add(bucket.union(tags), num);
         }
     }
 

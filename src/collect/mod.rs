@@ -8,6 +8,7 @@
 
 mod code;
 mod git;
+mod tags;
 mod walk;
 
 use std::collections::HashMap;
