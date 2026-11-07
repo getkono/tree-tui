@@ -63,8 +63,8 @@ impl Facet {
     /// is not live has no key, no chip, and is rejected by `--hide`.
     pub fn is_live(self) -> bool {
         match self {
-            Facet::Test | Facet::Comment | Facet::Blank => true,
-            Facet::Generated | Facet::BenchExample => false,
+            Facet::Test | Facet::Generated | Facet::Comment | Facet::Blank => true,
+            Facet::BenchExample => false,
         }
     }
 
