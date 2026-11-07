@@ -143,16 +143,23 @@ fn header_end(text: &[u8], lines: usize) -> usize {
 /// The `linguist-generated` rules of every `.gitattributes` in the walk.
 #[derive(Default)]
 pub struct GitAttributes {
-    /// One matcher per `.gitattributes`, deepest directory first. Set
-    /// patterns are plain, unset ones negated, so a match says which way the
-    /// last applicable line of that file went.
-    files: Vec<(PathBuf, Gitignore)>,
+    /// The rules of each `.gitattributes`, deepest directory first.
+    files: Vec<(PathBuf, Vec<Rule>)>,
+}
+
+/// One `.gitattributes` line that names `linguist-generated`.
+struct Rule {
+    /// The line's pattern, alone.
+    matcher: Gitignore,
+    /// What the line leaves the attribute as: set (`Some(true)`), unset
+    /// (`Some(false)`), or unspecified (`None`, from `!linguist-generated`).
+    state: Option<bool>,
 }
 
 impl GitAttributes {
     /// Read the `.gitattributes` files among `files` (relative to `root`).
     pub fn load(root: &Path, files: &[PathBuf]) -> Self {
-        let mut found: Vec<(PathBuf, Gitignore)> = files
+        let mut found: Vec<(PathBuf, Vec<Rule>)> = files
             .iter()
             .filter(|rel| rel.file_name().is_some_and(|name| name == ".gitattributes"))
             .filter_map(|rel| {
@@ -165,10 +172,10 @@ impl GitAttributes {
         Self { files: found }
     }
 
-    /// Build the matcher for one `.gitattributes` in `dir` (absolute).
-    fn parse(dir: &Path, text: &str) -> Option<Gitignore> {
-        let mut builder = GitignoreBuilder::new(dir);
-        let mut any = false;
+    /// The rules of one `.gitattributes` in `dir` (absolute), last line
+    /// first.
+    fn parse(dir: &Path, text: &str) -> Option<Vec<Rule>> {
+        let mut rules = Vec::new();
         for line in text.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -183,44 +190,53 @@ impl GitAttributes {
             if pattern.starts_with('!') {
                 continue;
             }
+            // The outer `None`: the line does not name the attribute.
             let state = fields.fold(None, |state, attr| match attr {
-                "linguist-generated" => Some(true),
-                "-linguist-generated" | "!linguist-generated" => Some(false),
+                "linguist-generated" => Some(Some(true)),
+                "-linguist-generated" => Some(Some(false)),
+                // `!attr` is git's "unspecified": it clears what earlier
+                // lines said, leaving Linguist to its own checks.
+                "!linguist-generated" => Some(None),
                 // Linguist reads any value but `false` as set.
                 _ => match attr.strip_prefix("linguist-generated=") {
-                    Some(value) => Some(value != "false"),
+                    Some(value) => Some(Some(value != "false")),
                     None => state,
                 },
             });
-            let glob = match state {
-                Some(true) => pattern.to_string(),
-                Some(false) => format!("!{pattern}"),
-                None => continue,
+            let Some(state) = state else {
+                continue;
             };
-            if builder.add_line(None, &glob).is_ok() {
-                any = true;
+            let mut builder = GitignoreBuilder::new(dir);
+            if builder.add_line(None, pattern).is_err() {
+                continue;
+            }
+            if let Ok(matcher) = builder.build() {
+                rules.push(Rule { matcher, state });
             }
         }
-        if !any {
+        if rules.is_empty() {
             return None;
         }
-        builder.build().ok()
+        rules.reverse();
+        Some(rules)
     }
 
     /// What `.gitattributes` says of the file `rel`: `Some(true)` when marked
-    /// `linguist-generated`, `Some(false)` when explicitly unmarked, `None`
-    /// when no line applies. The deepest `.gitattributes` with a line for it
-    /// decides, and within a file the last such line.
+    /// `linguist-generated`, `Some(false)` when explicitly unset, `None` when
+    /// no line applies or the deciding line leaves it unspecified
+    /// (`!linguist-generated`). The deepest `.gitattributes` with a line for
+    /// it decides, and within a file the last such line.
     pub fn generated(&self, root: &Path, rel: &Path) -> Option<bool> {
         let path = root.join(rel);
-        for (dir, matcher) in &self.files {
+        for (dir, rules) in &self.files {
             if !rel.starts_with(dir) {
                 continue;
             }
-            match matcher.matched(&path, false) {
-                Match::Ignore(_) => return Some(true),
-                Match::Whitelist(_) => return Some(false),
-                Match::None => {}
+            if let Some(rule) = rules
+                .iter()
+                .find(|rule| matches!(rule.matcher.matched(&path, false), Match::Ignore(_)))
+            {
+                return rule.state;
             }
         }
         None
@@ -228,8 +244,9 @@ impl GitAttributes {
 }
 
 /// Whether the file `rel` (detected as `lang`, holding `text`) is generated:
-/// what `.gitattributes` says when it says anything — an explicit unset
-/// overrides the rest, as on GitHub — else a lockfile name or a header marker.
+/// what `.gitattributes` says when it sets or unsets the attribute — an
+/// explicit unset overrides the rest, as on GitHub — else (no line, or
+/// `!linguist-generated`) a lockfile name or a header marker.
 pub fn is_generated(
     attributes: &GitAttributes,
     root: &Path,
@@ -459,9 +476,10 @@ mod tests {
         let files = vec![
             root.write(
                 ".gitattributes",
-                "vendored.pb.go -linguist-generated\npackage-lock.json !linguist-generated\n*.out linguist-generated=1\nboth.rs linguist-generated -linguist-generated\n",
+                "vendored.pb.go -linguist-generated\npackage-lock.json -linguist-generated\n*.out linguist-generated=1\nboth.rs linguist-generated -linguist-generated\n*.txt linguist-generated\ncleared*.txt !linguist-generated\nyarn.lock !linguist-generated\n",
             ),
             root.write("a/.gitattributes", "*.rs linguist-generated\n"),
+            root.write("c/.gitattributes", "!linguist-generated\n*.txt !linguist-generated\n"),
         ];
         let attrs = GitAttributes::load(&root.0, &files);
         let header = b"// Code generated by protoc. DO NOT EDIT.\npackage pb\n";
@@ -482,6 +500,20 @@ mod tests {
             LanguageType::Yaml,
             b"a: 1\n"
         ));
+        // `!linguist-generated` leaves the attribute unspecified: it clears an
+        // earlier set — in its own file or a parent's — and the other checks
+        // decide.
+        assert!(generated("kept.txt", LanguageType::Text, b"plain\n"));
+        assert_eq!(attrs.generated(&root.0, Path::new("cleared.txt")), None);
+        assert!(!generated("cleared.txt", LanguageType::Text, b"plain\n"));
+        assert!(generated(
+            "cleared.txt",
+            LanguageType::Json,
+            b"\"@generated\"\n"
+        ));
+        assert_eq!(attrs.generated(&root.0, Path::new("c/x.txt")), None);
+        assert!(!generated("c/x.txt", LanguageType::Text, b"plain\n"));
+        assert!(generated("yarn.lock", LanguageType::Text, b"a\n"));
         assert!(attrs.is_generated(&root.0, Path::new("x.out")));
         assert!(!attrs.is_generated(&root.0, Path::new("both.rs")));
         assert!(attrs.is_generated(&root.0, Path::new("a/x.rs")));

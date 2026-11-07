@@ -140,6 +140,10 @@ on the code lens by key or by clicking a header chip. A toggle only re-sorts and
 (bumping `rebuild_rev`). It **never invalidates or recomputes the code layer**, because the layer
 already caches every bucket.
 
+The chips shrink as the header narrows (`ui::header::fit_chips`): every chip labelled, then only
+the hidden ones labelled, then bare keys. While a facet is hidden its chip never disappears: when
+even the keys do not fit, they replace the recap's trailing fields, cut at a field boundary.
+
 `Loaded::value` is the single source of the numeric values. Every code column drops hidden tags,
 and `lines` also drops hidden kinds. Share, sort, `z`, exclusion and the header totals all read
 through it. `CodeData::counted_langs` applies the same rule per language, for the legend and the
@@ -182,13 +186,15 @@ and comments. Line and blank totals never change.
   - In Zig, `test "…" { }` blocks are marked.
 
 **Generated** files are tagged whole (`tags::generated`). `.gitattributes` decides when it says
-anything, including an explicit *unset*, which overrides the other checks as it does on GitHub.
+anything, including an explicit *unset* (`-linguist-generated`), which overrides the other checks
+as it does on GitHub.
 Otherwise a lockfile name or a header marker marks the file.
 
 - **`.gitattributes`.** `linguist-generated`, or `=` any value but `false`, marks the file.
-  `-linguist-generated`, `!linguist-generated`, or `=false` unmarks it. The patterns are compiled
-  with `ignore`'s gitignore matcher, one per `.gitattributes`, with unset lines negated. The
-  deepest file with a matching line decides, and within a file the last matching line decides.
+  `-linguist-generated` or `=false` unmarks it. `!linguist-generated` leaves it unspecified, as in
+  git: it clears what earlier lines said, and the other checks decide. Each line's pattern is
+  compiled with `ignore`'s gitignore matcher. The deepest file with a matching line decides, and
+  within a file the last matching line decides.
   Directory patterns (`vendor/`) mark no files, as in git; `vendor/**` does.
 - **Lockfile name.** `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`, `go.sum`,
   and others. tokei counts only some of them; the rest never reach the lens.
