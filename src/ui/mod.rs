@@ -551,7 +551,8 @@ mod tests {
         assert!(cell.modifier.contains(Modifier::CROSSED_OUT));
     }
 
-    /// No chips on the other lenses, and none when the recap leaves no room.
+    /// No chips on the other lenses, and none when nothing is hidden and the
+    /// recap leaves no room even for the bare keys.
     #[test]
     fn facet_chips_only_on_the_code_lens_and_when_they_fit() {
         let chips = |app: &App| match &app.screen {
@@ -559,7 +560,7 @@ mod tests {
             _ => unreachable!(),
         };
         let mut app = sample_app();
-        let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        let mut narrow = Terminal::new(TestBackend::new(40, 16)).unwrap();
         narrow.draw(|frame| render(frame, &mut app)).unwrap();
         assert_eq!(chips(&app), 0, "no room beside the recap");
 
@@ -567,6 +568,113 @@ mod tests {
         app.update(crate::action::Action::JumpLens(2)); // size
         wide.draw(|frame| render(frame, &mut app)).unwrap();
         assert_eq!(chips(&app), 0);
+    }
+
+    /// Too narrow for every labelled chip, the row keeps every facet: the
+    /// hidden ones still name themselves, struck through, and the rest shrink
+    /// to their keys; narrower still, every chip is its bare key. Each rect
+    /// stays where its text is drawn, so clicks still land.
+    #[test]
+    fn facet_chips_shrink_to_keys_when_narrow() {
+        use crate::model::Facet;
+        use ratatui::style::Modifier;
+
+        let chip_texts = |app: &App, terminal: &Terminal<TestBackend>| {
+            let chips = match &app.screen {
+                Screen::Loaded(loaded) => loaded.facet_chips.clone(),
+                _ => unreachable!(),
+            };
+            chips
+                .into_iter()
+                .map(|(rect, facet)| {
+                    let text = (rect.x..rect.x + rect.width)
+                        .map(|x| {
+                            terminal.backend().buffer()[(x, rect.y)]
+                                .symbol()
+                                .to_string()
+                        })
+                        .collect::<String>();
+                    let struck = terminal.backend().buffer()[(rect.x, rect.y)]
+                        .modifier
+                        .contains(Modifier::CROSSED_OUT);
+                    (facet, text, struck)
+                })
+                .collect::<Vec<_>>()
+        };
+        let live: Vec<Facet> = Facet::live().collect();
+
+        // The head hash widens the recap the way a real repository does.
+        let mut app = sample_app();
+        app.head_hash = Some("9ee4e1e".into());
+        app.update(crate::action::Action::ToggleFacet(Facet::Generated));
+
+        // 90 columns: too narrow for every label, but `generated` keeps its.
+        let mut medium = Terminal::new(TestBackend::new(90, 16)).unwrap();
+        medium.draw(|frame| render(frame, &mut app)).unwrap();
+        let chips = chip_texts(&app, &medium);
+        assert_eq!(chips.iter().map(|c| c.0).collect::<Vec<_>>(), live);
+        for (facet, text, struck) in &chips {
+            if *facet == Facet::Generated {
+                assert_eq!(text, "n generated");
+                assert!(struck, "hidden chip should be struck through");
+            } else {
+                assert_eq!(text, &facet.key().to_string());
+                assert!(!struck);
+            }
+        }
+        let view = format!("{}", medium.backend());
+        assert!(
+            view.contains("n generated"),
+            "hidden facet unnamed:\n{view}"
+        );
+
+        // Narrower: bare keys, the hidden one still struck through.
+        let mut narrow = Terminal::new(TestBackend::new(74, 16)).unwrap();
+        narrow.draw(|frame| render(frame, &mut app)).unwrap();
+        let chips = chip_texts(&app, &narrow);
+        assert_eq!(chips.iter().map(|c| c.0).collect::<Vec<_>>(), live);
+        for (facet, text, struck) in &chips {
+            assert_eq!(text, &facet.key().to_string());
+            assert_eq!(*struck, *facet == Facet::Generated);
+        }
+
+        // No room even for the keys: with a facet hidden they replace the
+        // recap's trailing fields rather than vanish, and the recap ends on a
+        // whole field, never a cut number.
+        let mut tight = Terminal::new(TestBackend::new(40, 16)).unwrap();
+        tight.draw(|frame| render(frame, &mut app)).unwrap();
+        let chips = chip_texts(&app, &tight);
+        assert_eq!(chips.iter().map(|c| c.0).collect::<Vec<_>>(), live);
+        for (facet, text, struck) in &chips {
+            assert_eq!(text, &facet.key().to_string());
+            assert_eq!(*struck, *facet == Facet::Generated);
+        }
+        let first = match &app.screen {
+            Screen::Loaded(loaded) => loaded.facet_chips[0].0,
+            _ => unreachable!(),
+        };
+        let kept = (0..first.x)
+            .map(|x| tight.backend().buffer()[(x, first.y)].symbol().to_string())
+            .collect::<String>();
+        let kept = kept.trim_end();
+        assert!(
+            ["9ee4e1e", "lines", "code", "comments"]
+                .iter()
+                .any(|field| kept.ends_with(field)),
+            "recap cut mid-field: {kept:?}"
+        );
+        assert!(kept.contains("lines"), "the total stays: {kept:?}");
+
+        // A click on a bare key still toggles its facet.
+        let (rect, facet) = match &app.screen {
+            Screen::Loaded(loaded) => loaded.facet_chips[0],
+            _ => unreachable!(),
+        };
+        app.handle_click(rect.x, rect.y);
+        match &app.screen {
+            Screen::Loaded(loaded) => assert!(loaded.hidden.contains(facet)),
+            _ => unreachable!(),
+        }
     }
 
     /// Hiding a kind takes it out of the header's `lines` and the legend's

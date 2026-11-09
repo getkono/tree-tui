@@ -235,13 +235,13 @@ mod tests {
             let err = parse_args(&["--hide", bad]).unwrap_err();
             assert!(
                 matches!(&err, CliError::BadValue { flag: "--hide", expected, .. }
-                    if expected == "test, comment, blank"),
+                    if expected == "test, generated, comment, blank"),
                 "{bad:?} gave {err:?}"
             );
         }
         // Known, but nothing produces it yet.
         assert!(matches!(
-            parse_args(&["--hide=generated"]),
+            parse_args(&["--hide=bench"]),
             Err(CliError::BadValue { flag: "--hide", .. })
         ));
     }

@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Padding, Paragraph};
+use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 
 use super::theme;
 use crate::app::Loaded;
@@ -74,7 +74,7 @@ pub fn render(
     // code lens, the LOC summary). Prefix the repo's HEAD short hash to its left.
     let mut recap = lens_recap(loaded);
     if let Some(hash) = head_hash {
-        recap.spans.insert(0, Span::raw("   "));
+        recap.spans.insert(0, Span::raw(RECAP_GAP));
         recap.spans.insert(
             0,
             Span::styled(hash.to_string(), Style::default().fg(theme::MUTED)),
@@ -87,6 +87,15 @@ pub fn render(
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     let recap_width = recap.width() as u16;
+    // Where each recap field ends: the start of every gap between fields.
+    let mut field_ends = Vec::new();
+    let mut x = 0;
+    for span in &recap.spans {
+        if span.content == RECAP_GAP {
+            field_ends.push(x);
+        }
+        x += span.width() as u16;
+    }
     frame.render_widget(
         Paragraph::new(vec![Line::from(line1), recap]).block(block),
         area,
@@ -98,36 +107,97 @@ pub fn render(
             height: 1,
             ..inner
         };
-        render_facet_chips(frame, loaded.hidden, row, recap_width)
+        render_facet_chips(frame, loaded.hidden, row, recap_width, &field_ends)
     } else {
         Vec::new()
     }
 }
 
+/// The gap between the recap's fields.
+const RECAP_GAP: &str = "   ";
+
 /// The gap kept between the recap and the facet chips.
 const CHIP_GAP: u16 = 3;
 
+/// The chip texts for one layout: `labelled(facet)` says whether a chip keeps
+/// its label (`t test`) or shrinks to its key (`t`).
+fn chip_texts(labelled: impl Fn(Facet) -> bool) -> Vec<(Facet, String)> {
+    Facet::live()
+        .map(|facet| {
+            let text = if labelled(facet) {
+                format!("{} {}", facet.key(), facet.label())
+            } else {
+                facet.key().to_string()
+            };
+            (facet, text)
+        })
+        .collect()
+}
+
+/// The width of a chip row: its texts, one column apart.
+fn chips_width(chips: &[(Facet, String)]) -> u16 {
+    chips
+        .iter()
+        .map(|(_, text)| text.len() as u16 + 1)
+        .sum::<u16>()
+        .saturating_sub(1)
+}
+
+/// The widest chip layout that fits beside the recap: every chip labelled;
+/// else only the hidden ones labelled, so a hidden facet always names itself;
+/// else every chip as its bare key. `None` when even the keys do not fit.
+fn fit_chips(hidden: Hidden, room: u16) -> Option<Vec<(Facet, String)>> {
+    [
+        chip_texts(|_| true),
+        chip_texts(|facet| hidden.contains(facet)),
+        chip_texts(|_| false),
+    ]
+    .into_iter()
+    .find(|chips| chips_width(chips) <= room)
+}
+
 /// The code lens's facet chips, right-aligned on `row`: one per live facet,
-/// lit while its lines count and struck through while hidden. Returns each
-/// chip's rect for click hit-testing, or nothing when the row is too narrow to
-/// hold them beside the recap's `recap_width` columns.
+/// lit while its lines count and struck through while hidden. As the row
+/// narrows, the chips shrink to their keys (see [`fit_chips`]). When even the
+/// keys do not fit beside the recap's `recap_width` columns, they are left out
+/// while nothing is hidden; while something is, the recap's trailing fields
+/// are blanked whole (it ends at one of `field_ends`, never mid-number) to make
+/// room for the keys, so reduced totals never show without a sign. Returns
+/// each chip's rect for click hit-testing.
 fn render_facet_chips(
     frame: &mut Frame,
     hidden: Hidden,
     row: Rect,
     recap_width: u16,
+    field_ends: &[u16],
 ) -> Vec<(Rect, Facet)> {
-    let chips: Vec<(Facet, String)> = Facet::live()
-        .map(|facet| (facet, format!("{} {}", facet.key(), facet.label())))
-        .collect();
-    let width: u16 = chips
-        .iter()
-        .map(|(_, text)| text.len() as u16 + 1)
-        .sum::<u16>()
-        .saturating_sub(1);
-    if row.width < recap_width + CHIP_GAP + width {
-        return Vec::new();
-    }
+    let room = row.width.saturating_sub(recap_width + CHIP_GAP);
+    let chips = match fit_chips(hidden, room) {
+        Some(chips) => chips,
+        None if !hidden.is_empty() => {
+            let keys = chip_texts(|_| false);
+            let Some(avail) = row.width.checked_sub(chips_width(&keys) + CHIP_GAP) else {
+                return Vec::new();
+            };
+            let keep = field_ends
+                .iter()
+                .copied()
+                .filter(|&end| end <= avail)
+                .max()
+                .unwrap_or(0);
+            frame.render_widget(
+                Clear,
+                Rect {
+                    x: row.x + keep,
+                    width: row.width - keep,
+                    ..row
+                },
+            );
+            keys
+        }
+        None => return Vec::new(),
+    };
+    let width = chips_width(&chips);
 
     let mut x = row.x + row.width - width;
     let mut rects = Vec::with_capacity(chips.len());
@@ -177,7 +247,7 @@ fn lens_recap(loaded: &Loaded) -> Line<'static> {
 
     let root = loaded.tree.root;
     let value = |key: SubKey| loaded.effective_value(key, root);
-    let gap = "   ";
+    let gap = RECAP_GAP;
     let label = |text: &'static str| Span::styled(text, Style::default().fg(theme::MUTED));
     let strong = |value: u128| {
         Span::styled(
