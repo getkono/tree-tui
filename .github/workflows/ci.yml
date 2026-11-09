@@ -51,9 +51,12 @@ jobs:
   # the gate.
   #
   # NOT a required check yet. At vibe-check's current milestone `classify` is
-  # unimplemented and exits 1, so this job is expected to fail — it is here to
-  # prove the distribution chain works from outside its own repository. Make it
-  # required only once exit 0 is the normal outcome.
+  # unimplemented and exits 1 (getkono/vibe-check#92). This job is here to prove
+  # the distribution chain works from outside its own repository, so it fails
+  # only when that chain breaks — guard, resolve, digest check, unpack — and
+  # reports a non-zero `classify` as a warning instead of a red check on every
+  # pull request. Once exit 0 is the normal outcome, drop `continue-on-error`
+  # and the gate step below, and make it required.
   vibe-check:
     name: vibe-check
     # Only pull requests have a merge base to classify against.
@@ -76,4 +79,26 @@ jobs:
           persist-credentials: false
       # The immutable tag, not the `@v0` alias: before 1.0 the alias carries no
       # compatibility promise.
-      - uses: getkono/vibe-check@v0.1.0
+      - id: vibe-check
+        uses: getkono/vibe-check@v0.1.0
+        continue-on-error: true
+      # The action writes its verdict file only from its `Classify` step, after
+      # the guard and the verified install have succeeded. So a failure with no
+      # verdict file is the distribution chain breaking, and fails this job; a
+      # failure with one is `classify` itself exiting non-zero, expected until
+      # getkono/vibe-check#92 lands.
+      - name: Require the distribution chain to reach classify
+        if: always()
+        env:
+          OUTCOME: ${{ steps.vibe-check.outcome }}
+          VERDICT_FILE: ${{ steps.vibe-check.outputs.verdict-file }}
+        run: |
+          verdict="${VERDICT_FILE:-$RUNNER_TEMP/vibe-check.json}"
+          if [ "$OUTCOME" = success ]; then
+            echo "vibe-check classified the change."
+          elif [ -f "$verdict" ]; then
+            echo "::warning::vibe-check classify exited non-zero; expected until getkono/vibe-check#92 lands. The distribution chain worked."
+          else
+            echo "::error::vibe-check failed before classify ran: the distribution chain is broken (outcome: $OUTCOME)."
+            exit 1
+          fi
