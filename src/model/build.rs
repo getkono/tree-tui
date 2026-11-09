@@ -101,9 +101,10 @@ where
     vals.into_boxed_slice()
 }
 
-/// Like [`aggregate`], but for the code layer: sums line counts *and* merges the
-/// per-language breakdown up the tree. `primary_lang` stays per-file (directories
-/// are colored by kind, not language).
+/// Like [`aggregate`], but for the code layer: merges the per-language,
+/// per-tag-set counts up the tree, so every directory can be read under any
+/// facet filter without recomputing. `primary_lang` stays per-file
+/// (directories are colored by kind, not language).
 pub fn aggregate_code(tree: &Tree, per_file: &HashMap<PathBuf, CodeData>) -> Box<[CodeData]> {
     let mut vals: Vec<CodeData> = vec![CodeData::default(); tree.nodes.len()];
     for (path, data) in per_file {
@@ -113,12 +114,13 @@ pub fn aggregate_code(tree: &Tree, per_file: &HashMap<PathBuf, CodeData>) -> Box
     }
     for id in depth_desc(&tree.nodes) {
         if let Some(parent) = tree.nodes[id].parent {
-            let num = vals[id].num;
-            let langs = vals[id].langs.clone();
-            vals[parent].num += num;
-            for (lang, stats) in langs {
-                *vals[parent].langs.entry(lang).or_default() += stats;
-            }
+            let child = std::mem::take(&mut vals[id].langs);
+            let merged = CodeData {
+                langs: child,
+                primary_lang: None,
+            };
+            vals[parent].merge(&merged);
+            vals[id].langs = merged.langs;
         }
     }
     vals.into_boxed_slice()
@@ -219,7 +221,7 @@ mod tests {
         // The code layer is empty for it; aggregation leaves it at zero.
         let code = aggregate_code(&tree, &HashMap::new());
         let logo_id = tree.index[&rel("assets/logo.png")];
-        assert_eq!(code[logo_id].num.lines(), 0);
+        assert_eq!(code[logo_id].total().lines(), 0);
     }
 
     #[test]
@@ -259,20 +261,50 @@ mod tests {
             comments: 10,
             blanks: 5,
         };
-        let mut main = CodeData {
-            num,
-            ..Default::default()
-        };
-        main.langs.insert(LanguageType::Rust, num);
+        let main = CodeData::untagged([(LanguageType::Rust, num)], Some(LanguageType::Rust));
         per_file.insert(rel("src/main.rs"), main);
 
         let code = aggregate_code(&tree, &per_file);
         let src_id = tree.index[&rel("src")];
-        assert_eq!(code[src_id].num.code, 100);
+        assert_eq!(code[src_id].total().code, 100);
         assert_eq!(
-            code[src_id].langs.get(&LanguageType::Rust).unwrap().code,
+            code[src_id]
+                .langs
+                .get(&LanguageType::Rust)
+                .unwrap()
+                .total()
+                .code,
             100
         );
-        assert_eq!(code[tree.root].num.lines(), 115);
+        assert_eq!(code[tree.root].total().lines(), 115);
+        assert_eq!(
+            code[src_id].primary_lang, None,
+            "directories carry no language"
+        );
+    }
+
+    /// Tagged lines keep their tags all the way up, so a directory can drop
+    /// them under a filter without recomputing.
+    #[test]
+    fn aggregate_code_keeps_tag_buckets() {
+        use crate::model::{TagBuckets, TagSet};
+        let tree = skeleton();
+        let lines = |code| CodeNum {
+            code,
+            comments: 0,
+            blanks: 0,
+        };
+        let mut buckets = TagBuckets::of(TagSet::EMPTY, lines(70));
+        buckets.add(TagSet::TEST, lines(30));
+        let main = CodeData {
+            langs: [(LanguageType::Rust, buckets)].into(),
+            primary_lang: Some(LanguageType::Rust),
+        };
+        let mut per_file = HashMap::new();
+        per_file.insert(rel("src/main.rs"), main);
+
+        let code = aggregate_code(&tree, &per_file);
+        assert_eq!(code[tree.root].total().code, 100);
+        assert_eq!(code[tree.root].visible(TagSet::TEST).code, 70);
     }
 }

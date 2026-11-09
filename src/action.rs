@@ -5,6 +5,8 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::model::Facet;
+
 /// A semantic action produced from a key press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -46,6 +48,8 @@ pub enum Action {
     Yank,
     /// Toggle mouse capture so the terminal's native selection works.
     ToggleMouseCapture,
+    /// Hide or show one line facet in the code lens.
+    ToggleFacet(Facet),
 }
 
 /// Translate a key press into an [`Action`].
@@ -81,6 +85,12 @@ pub fn map_key(key: KeyEvent) -> Action {
         KeyCode::Char('w') => Action::CycleFocus,
         KeyCode::Char('y') => Action::Yank,
         KeyCode::Char('S') => Action::ToggleMouseCapture,
+        KeyCode::Char(c) if !ctrl => facet_for_key(c).map_or(Action::None, Action::ToggleFacet),
         _ => Action::None,
     }
+}
+
+/// The live facet toggled by `c`, if any.
+fn facet_for_key(c: char) -> Option<Facet> {
+    Facet::live().find(|facet| facet.key() == c)
 }

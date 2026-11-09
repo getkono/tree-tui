@@ -8,15 +8,17 @@ use ratatui::widgets::{Block, Padding, Paragraph};
 
 use super::theme;
 use crate::app::Loaded;
-use crate::model::{Lens, SubKey};
+use crate::model::{Facet, Hidden, Lens, SubKey};
 
+/// Draw the header, returning the code lens's facet chips (rect + facet) for
+/// mouse hit-testing — empty on other lenses.
 pub fn render(
     frame: &mut Frame,
     root_label: &str,
     head_hash: Option<&str>,
     loaded: &Loaded,
     area: Rect,
-) {
+) -> Vec<(Rect, Facet)> {
     let tree = &loaded.tree;
     let root = tree.root;
     let scanned = if loaded.duration.as_millis() >= 1000 {
@@ -49,9 +51,15 @@ pub fn render(
         ),
     ];
     if let Some(code) = loaded.code_at(root) {
+        // Facets act only on the code lens, so only there do they thin the count.
+        let hidden = if loaded.active_lens == Lens::Code {
+            loaded.hidden
+        } else {
+            Hidden::default()
+        };
         line1.push(dot);
         line1.push(Span::styled(
-            format!("{} languages", code.langs.len()),
+            format!("{} languages", code.counted_langs(hidden).len()),
             Style::default().fg(theme::MUTED),
         ));
     }
@@ -77,10 +85,83 @@ pub fn render(
         .title(" tree ")
         .border_style(Style::default().fg(theme::MUTED))
         .padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    let recap_width = recap.width() as u16;
     frame.render_widget(
         Paragraph::new(vec![Line::from(line1), recap]).block(block),
         area,
     );
+
+    if loaded.active_lens == Lens::Code && inner.height >= 2 {
+        let row = Rect {
+            y: inner.y + 1,
+            height: 1,
+            ..inner
+        };
+        render_facet_chips(frame, loaded.hidden, row, recap_width)
+    } else {
+        Vec::new()
+    }
+}
+
+/// The gap kept between the recap and the facet chips.
+const CHIP_GAP: u16 = 3;
+
+/// The code lens's facet chips, right-aligned on `row`: one per live facet,
+/// lit while its lines count and struck through while hidden. Returns each
+/// chip's rect for click hit-testing, or nothing when the row is too narrow to
+/// hold them beside the recap's `recap_width` columns.
+fn render_facet_chips(
+    frame: &mut Frame,
+    hidden: Hidden,
+    row: Rect,
+    recap_width: u16,
+) -> Vec<(Rect, Facet)> {
+    let chips: Vec<(Facet, String)> = Facet::live()
+        .map(|facet| (facet, format!("{} {}", facet.key(), facet.label())))
+        .collect();
+    let width: u16 = chips
+        .iter()
+        .map(|(_, text)| text.len() as u16 + 1)
+        .sum::<u16>()
+        .saturating_sub(1);
+    if row.width < recap_width + CHIP_GAP + width {
+        return Vec::new();
+    }
+
+    let mut x = row.x + row.width - width;
+    let mut rects = Vec::with_capacity(chips.len());
+    for (facet, text) in chips {
+        let rect = Rect {
+            x,
+            width: text.len() as u16,
+            ..row
+        };
+        let (key_style, label_style) = if hidden.contains(facet) {
+            let struck = Style::default()
+                .fg(theme::MUTED)
+                .add_modifier(Modifier::CROSSED_OUT);
+            (struck, struck)
+        } else {
+            (
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+                Style::default(),
+            )
+        };
+        let (key, label) = text.split_at(1);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(key.to_string(), key_style),
+                Span::styled(label.to_string(), label_style),
+            ])),
+            rect,
+        );
+        rects.push((rect, facet));
+        x += rect.width + 1;
+    }
+    rects
 }
 
 /// The second header line: a recap of the active lens's grand totals.
@@ -111,6 +192,20 @@ fn lens_recap(loaded: &Loaded) -> Line<'static> {
         )
     };
 
+    // A hidden kind still shows its count, struck through: it is left out of
+    // `lines`, not out of the tree.
+    let kind = |span: Span<'static>, facet: Facet| {
+        if loaded.hidden.contains(facet) {
+            span.patch_style(
+                Style::default()
+                    .fg(theme::MUTED)
+                    .add_modifier(Modifier::CROSSED_OUT),
+            )
+        } else {
+            span
+        }
+    };
+
     match loaded.active_lens {
         Lens::Code => Line::from(vec![
             strong(value(SubKey::Lines)),
@@ -119,11 +214,14 @@ fn lens_recap(loaded: &Loaded) -> Line<'static> {
             tinted(value(SubKey::Code), theme::CODE),
             label(" code"),
             Span::raw(gap),
-            tinted(value(SubKey::Comments), theme::COMMENTS),
-            label(" comments"),
+            kind(
+                tinted(value(SubKey::Comments), theme::COMMENTS),
+                Facet::Comment,
+            ),
+            kind(label(" comments"), Facet::Comment),
             Span::raw(gap),
-            tinted(value(SubKey::Blanks), theme::BLANKS),
-            label(" blanks"),
+            kind(tinted(value(SubKey::Blanks), theme::BLANKS), Facet::Blank),
+            kind(label(" blanks"), Facet::Blank),
         ]),
         Lens::Size => Line::from(vec![
             Span::styled(

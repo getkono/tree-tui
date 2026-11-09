@@ -118,11 +118,36 @@ checklist. (The genuine plug-in seam is the **collectors**, which are independen
 
 - Each lens with a layer tracks state via `Layer<T>` = `NotComputed` → `Computing` → `Ready(Box<[T]>)`.
 - Activating a lens whose layer is `NotComputed` sets `App.pending_compute`; the event loop drains
-  it and spawns `collect::compute(lens, root)` on a blocking thread.
+  it and spawns `collect::compute(lens, root, files)` on a blocking thread.
 - The result (`LayerResult`) returns over an `mpsc` channel; `Loaded::apply_layer` aggregates and
   caches it, then re-sorts if it's the active lens.
 - `Size` needs no layer — it reads `TreeNode.bytes` directly, so it's instant.
 - The spinner ticks while any layer is `Computing`; an idle, fully-loaded tree consumes no CPU.
+
+## Line facets (code lens)
+
+A **facet** (`model::facet::Facet`) is a kind of line the code lens can hide. There are two sorts:
+
+- **Tags** (test, generated, bench/example) mark *which lines*. The collector files each line under
+  the `TagSet` it carries, and `CodeData` keeps per language a `TagBuckets` (a sparse map from tag
+  set to `CodeNum`, at most eight entries, usually one). `aggregate_code` merges buckets up the
+  tree, so every directory holds its subtree's lines split by tags.
+- **Kinds** (comment, blank) mark *which column* to leave out of `lines`. Their own columns keep
+  showing them, struck through in the header.
+
+Hidden facets are view state (`Loaded::hidden`). They are set at startup by `--hide`, and toggled
+on the code lens by key or by clicking a header chip. A toggle only re-sorts and rebuilds the rows
+(bumping `rebuild_rev`). It **never invalidates or recomputes the code layer**, because the layer
+already caches every bucket.
+
+`Loaded::value` is the single source of the numeric values. Every code column drops hidden tags,
+and `lines` also drops hidden kinds. Share, sort, `z`, exclusion and the header totals all read
+through it. `CodeData::counted_langs` applies the same rule per language, for the legend and the
+header's language count.
+
+A facet whose lines the collector cannot produce yet is not *live* (`Facet::is_live`). It has no
+key, no chip, and no `--hide` value. Turning one on takes a detector that files lines under its
+tag, plus flipping its `is_live` arm.
 
 ## How to add a lens
 

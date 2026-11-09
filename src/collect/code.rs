@@ -115,11 +115,7 @@ fn read_decoded(path: &Path) -> std::io::Result<Vec<u8>> {
 /// detected as, never by an embedded one — a README full of fenced Rust is
 /// still Markdown.
 fn code_data(lang: LanguageType, counts: FileCounts) -> CodeData {
-    CodeData {
-        num: counts.total,
-        langs: counts.langs,
-        primary_lang: Some(lang),
-    }
+    CodeData::untagged(counts.langs, Some(lang))
 }
 
 /// Count one file's lines as `lang`.
@@ -759,7 +755,7 @@ mod tests {
         let ci = counted
             .get(Path::new(".github/workflows/ci.yml"))
             .expect("a file under a dot-directory is counted");
-        assert!(ci.num.code > 0, "and it has real line counts");
+        assert!(ci.total().code > 0, "and it has real line counts");
         assert!(!inaccurate);
     }
 
@@ -779,7 +775,7 @@ mod tests {
         let mut keys: Vec<_> = counted.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, files.to_vec());
-        assert_eq!(counted[Path::new("gen/forced.rs")].num, num(1, 0, 0));
+        assert_eq!(counted[Path::new("gen/forced.rs")].total(), num(1, 0, 0));
     }
 
     #[test]
@@ -791,7 +787,7 @@ mod tests {
         }
         root.write("a.rs", bytes);
         let (counted, _) = super::collect_code(&root.0, &[PathBuf::from("a.rs")]);
-        assert_eq!(counted[Path::new("a.rs")].num, num(1, 1, 1));
+        assert_eq!(counted[Path::new("a.rs")].total(), num(1, 1, 1));
     }
 
     /// A file removed since the walk is skipped, not an error: the watcher's
@@ -853,6 +849,9 @@ mod tests {
         let (counted, _) = super::collect_code(&root.0, &[PathBuf::from("r.md")]);
         let data = &counted[Path::new("r.md")];
         assert_eq!(data.primary_lang, Some(LanguageType::Markdown));
-        assert!(data.langs[&LanguageType::Rust].code > data.langs[&LanguageType::Markdown].lines());
+        assert!(
+            data.langs[&LanguageType::Rust].total().code
+                > data.langs[&LanguageType::Markdown].total().lines()
+        );
     }
 }

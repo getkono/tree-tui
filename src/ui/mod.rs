@@ -114,7 +114,7 @@ fn render_loaded(frame: &mut Frame, app: &mut App, area: Rect) {
     ])
     .areas(area);
 
-    header::render(
+    loaded.facet_chips = header::render(
         frame,
         &root_label,
         head_hash.as_deref(),
@@ -262,13 +262,7 @@ mod tests {
             comments: 0,
             blanks: 0,
         };
-        let mut data = CodeData {
-            num,
-            primary_lang: Some(lang),
-            ..Default::default()
-        };
-        data.langs.insert(lang, num);
-        data
+        CodeData::untagged([(lang, num)], Some(lang))
     }
 
     /// A loaded app for `/proj` with the code layer already computed.
@@ -510,6 +504,192 @@ mod tests {
             view.contains('1') && view.contains('2'),
             "gutter missing:\n{view}"
         );
+    }
+
+    /// The code lens shows one chip per live facet on the recap line; the rect
+    /// recorded for each is where its text is drawn, and a click there
+    /// toggles it and strikes it through on the next frame.
+    #[test]
+    fn facet_chips_render_where_they_are_hit_tested() {
+        use crate::model::Facet;
+        use ratatui::style::Modifier;
+
+        let mut app = sample_app();
+        let mut terminal = Terminal::new(TestBackend::new(140, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let chips = match &app.screen {
+            Screen::Loaded(loaded) => loaded.facet_chips.clone(),
+            _ => unreachable!(),
+        };
+        let live: Vec<Facet> = Facet::live().collect();
+        assert_eq!(chips.iter().map(|&(_, f)| f).collect::<Vec<_>>(), live);
+
+        let cell_text = |terminal: &Terminal<TestBackend>, rect: ratatui::layout::Rect| {
+            (rect.x..rect.x + rect.width)
+                .map(|x| {
+                    terminal.backend().buffer()[(x, rect.y)]
+                        .symbol()
+                        .to_string()
+                })
+                .collect::<String>()
+        };
+        for &(rect, facet) in &chips {
+            assert_eq!(
+                cell_text(&terminal, rect),
+                format!("{} {}", facet.key(), facet.label())
+            );
+        }
+
+        let (rect, facet) = chips[0];
+        app.handle_click(rect.x + 1, rect.y);
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        match &app.screen {
+            Screen::Loaded(loaded) => assert!(loaded.hidden.contains(facet)),
+            _ => unreachable!(),
+        }
+        let cell = &terminal.backend().buffer()[(rect.x + 2, rect.y)];
+        assert!(cell.modifier.contains(Modifier::CROSSED_OUT));
+    }
+
+    /// No chips on the other lenses, and none when the recap leaves no room.
+    #[test]
+    fn facet_chips_only_on_the_code_lens_and_when_they_fit() {
+        let chips = |app: &App| match &app.screen {
+            Screen::Loaded(loaded) => loaded.facet_chips.len(),
+            _ => unreachable!(),
+        };
+        let mut app = sample_app();
+        let mut narrow = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        narrow.draw(|frame| render(frame, &mut app)).unwrap();
+        assert_eq!(chips(&app), 0, "no room beside the recap");
+
+        let mut wide = Terminal::new(TestBackend::new(140, 16)).unwrap();
+        app.update(crate::action::Action::JumpLens(2)); // size
+        wide.draw(|frame| render(frame, &mut app)).unwrap();
+        assert_eq!(chips(&app), 0);
+    }
+
+    /// Hiding a kind takes it out of the header's `lines` and the legend's
+    /// split, while its own count stays on the recap, struck through.
+    #[test]
+    fn hiding_blanks_updates_the_header_and_legend() {
+        use crate::model::Facet;
+
+        let mut app = sample_app();
+        let mut layer = HashMap::new();
+        let rust = LanguageType::Rust;
+        let markdown = LanguageType::Markdown;
+        let lines = |code, blanks| CodeNum {
+            code,
+            comments: 0,
+            blanks,
+        };
+        layer.insert(
+            PathBuf::from("src/main.rs"),
+            CodeData::untagged(
+                [(rust, lines(100, 0)), (markdown, lines(0, 50))],
+                Some(rust),
+            ),
+        );
+        app.on_layer(LayerResult::Code {
+            files: layer,
+            inaccurate: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(140, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(view.contains("150 lines"), "{view}");
+        assert!(view.contains("2 languages"), "{view}");
+
+        app.update(crate::action::Action::ToggleFacet(Facet::Blank));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(view.contains("100 lines"), "{view}");
+        assert!(view.contains("50 blanks"), "the count stays: {view}");
+        assert!(
+            view.contains("1 languages"),
+            "Markdown had only blanks: {view}"
+        );
+
+        // Facets act only on the code lens: elsewhere the count is unfiltered.
+        app.update(crate::action::Action::JumpLens(2));
+        let Screen::Loaded(l) = &app.screen else {
+            panic!("not loaded")
+        };
+        assert_eq!(l.active_lens, Lens::Size);
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(
+            view.contains("2 languages"),
+            "facets leaked off the code lens: {view}"
+        );
+    }
+
+    /// A row's language legend splits what its `lines` counts, so hiding a
+    /// kind re-splits it — on a warm row cache, not just the first frame.
+    #[test]
+    fn the_row_legend_follows_the_facets() {
+        use crate::model::Facet;
+
+        let mut app = sample_app();
+        let rust = LanguageType::Rust;
+        let markdown = LanguageType::Markdown;
+        let lines = |code, blanks| CodeNum {
+            code,
+            comments: 0,
+            blanks,
+        };
+        let layer = HashMap::from([(
+            PathBuf::from("src/main.rs"),
+            CodeData::untagged(
+                [(rust, lines(100, 0)), (markdown, lines(0, 100))],
+                Some(rust),
+            ),
+        )]);
+        app.on_layer(LayerResult::Code {
+            files: layer,
+            inaccurate: false,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(140, 16)).unwrap();
+        let src_row = |terminal: &Terminal<TestBackend>| {
+            format!("{}", terminal.backend())
+                .lines()
+                .find(|line| line.contains("src/"))
+                .expect("the src row is drawn")
+                .to_string()
+        };
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap(); // warm cache
+        let before = src_row(&terminal);
+        assert!(
+            before.contains("Markdown") && before.contains("50.0%"),
+            "{before}"
+        );
+
+        app.update(crate::action::Action::ToggleFacet(Facet::Blank));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let after = src_row(&terminal);
+        assert!(!after.contains("Markdown"), "{after}");
+        assert!(after.contains("Rust"), "{after}");
+    }
+
+    /// The footer advertises the facet keys on the code lens only.
+    #[test]
+    fn the_footer_hint_lists_facet_keys_on_the_code_lens() {
+        let mut app = sample_app();
+        let mut terminal = Terminal::new(TestBackend::new(200, 16)).unwrap();
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        let footer = |terminal: &Terminal<TestBackend>| {
+            format!("{}", terminal.backend())
+                .lines()
+                .last()
+                .unwrap()
+                .to_string()
+        };
+        assert!(footer(&terminal).contains("c/b hide lines"));
+        app.update(crate::action::Action::JumpLens(2));
+        terminal.draw(|frame| render(frame, &mut app)).unwrap();
+        assert!(!footer(&terminal).contains("hide lines"));
     }
 
     #[test]
