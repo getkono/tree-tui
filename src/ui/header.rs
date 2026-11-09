@@ -51,9 +51,15 @@ pub fn render(
         ),
     ];
     if let Some(code) = loaded.code_at(root) {
+        // Facets act only on the code lens, so only there do they thin the count.
+        let hidden = if loaded.active_lens == Lens::Code {
+            loaded.hidden
+        } else {
+            Hidden::default()
+        };
         line1.push(dot);
         line1.push(Span::styled(
-            format!("{} languages", code.counted_langs(loaded.hidden).len()),
+            format!("{} languages", code.counted_langs(hidden).len()),
             Style::default().fg(theme::MUTED),
         ));
     }

@@ -58,7 +58,12 @@ fn bindings() -> Vec<(String, String)> {
 
 pub fn render(frame: &mut Frame, area: Rect) {
     let bindings = bindings();
-    let key_width = bindings.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    // `{:<w$}` pads by chars, so measure keys in chars (not bytes: `↓`, `–`).
+    let key_width = bindings
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
     let mut lines = vec![Line::default()];
     for (keys, description) in &bindings {
         lines.push(Line::from(vec![
@@ -74,8 +79,8 @@ pub fn render(frame: &mut Frame, area: Rect) {
         ]));
     }
 
-    // Fit the longest row: its display width plus the two borders and the
-    // horizontal padding, so no description is cut off when the screen allows.
+    // Size the popup to its widest row (plus border and padding), so no
+    // description is cut off while the terminal has room for it.
     let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
     let width = (content_width + 4).min(area.width.saturating_sub(4) as usize) as u16;
     let height = (lines.len() + 2).min(area.height.saturating_sub(2) as usize) as u16;
@@ -122,20 +127,22 @@ mod tests {
         assert_eq!(rows.len(), BINDINGS.len() + facets.len());
     }
 
-    /// On a roomy screen the popup is wide enough that every row shows whole.
+    /// On a terminal with room for it, every row renders whole: the popup is
+    /// as wide as its widest description, so none is cut off mid-word.
     #[test]
-    fn every_row_fits_the_popup() {
+    fn every_row_renders_in_full() {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let rows = bindings();
+        let mut terminal = Terminal::new(TestBackend::new(120, rows.len() as u16 + 6)).unwrap();
         terminal.draw(|frame| render(frame, frame.area())).unwrap();
         let view = format!("{}", terminal.backend());
-        for (keys, description) in bindings() {
-            assert!(view.contains(&keys), "key {keys:?} cut off:\n{view}");
+        for (keys, description) in &rows {
+            assert!(view.contains(keys.as_str()), "{keys} cut off:\n{view}");
             assert!(
-                view.contains(&description),
-                "row {description:?} cut off:\n{view}"
+                view.contains(description.as_str()),
+                "{description} cut off:\n{view}"
             );
         }
     }
