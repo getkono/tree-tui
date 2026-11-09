@@ -48,6 +48,16 @@ impl Facet {
         }
     }
 
+    /// What the facet covers, spelled out for the help screen. Usually the
+    /// label; `bench` keeps its short label in the header chip and `--hide`,
+    /// but also hides `examples/`, so its help row says so.
+    pub fn description(self) -> &'static str {
+        match self {
+            Facet::BenchExample => "bench / example",
+            _ => self.label(),
+        }
+    }
+
     /// The key that toggles it.
     pub fn key(self) -> char {
         match self {
@@ -57,20 +67,6 @@ impl Facet {
             Facet::Comment => 'c',
             Facet::Blank => 'b',
         }
-    }
-
-    /// Whether the collector can produce this facet's lines yet. A facet that
-    /// is not live has no key, no chip, and is rejected by `--hide`.
-    pub fn is_live(self) -> bool {
-        match self {
-            Facet::Test | Facet::Generated | Facet::Comment | Facet::Blank => true,
-            Facet::BenchExample => false,
-        }
-    }
-
-    /// The facets the user can toggle, in display order.
-    pub fn live() -> impl Iterator<Item = Facet> {
-        Self::ALL.into_iter().filter(|facet| facet.is_live())
     }
 
     /// The facet with this `--hide` name, if any.

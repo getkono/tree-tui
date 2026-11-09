@@ -1023,6 +1023,23 @@ mod tests {
         assert_eq!(counted[Path::new("tests/gen_test.rs")].total().lines(), 3);
     }
 
+    /// A benchmark file with a test in it: hiding benches drops it all,
+    /// hiding tests drops the test, and hiding both drops each line once.
+    #[test]
+    fn bench_and_test_tags_overlap_without_double_counting() {
+        let root = TempRoot::new("bench");
+        root.write(
+            "benches/walk.rs",
+            "fn bench() {}\n\n#[test]\nfn sanity() {}\n",
+        );
+        let (counted, _) = super::collect_code(&root.0, &[PathBuf::from("benches/walk.rs")]);
+        let data = &counted[Path::new("benches/walk.rs")];
+        assert_eq!(data.total().lines(), 4);
+        assert_eq!(data.visible(TagSet::BENCH).lines(), 0);
+        assert_eq!(data.visible(TagSet::TEST).lines(), 2);
+        assert_eq!(data.visible(TagSet::TEST.union(TagSet::BENCH)).lines(), 0);
+    }
+
     // --- The collector.
 
     #[test]

@@ -52,6 +52,12 @@ pub fn marks_test(text: &str) -> bool {
     TEST_ATTRS.contains(&path.as_str()) || path.ends_with("::test")
 }
 
+/// Whether the attribute `text` marks a benchmark: libtest's `#[bench]`.
+/// (Criterion and divan benchmarks live under `benches/`, found by path.)
+pub fn marks_bench(text: &str) -> bool {
+    attribute_path(text).as_deref() == Some("bench")
+}
+
 /// An attribute's path (`tokio::test`), if its text is `#[path…]` or
 /// `#![path…]` with the path followed by nothing, `(`, or `=`.
 pub fn attribute_path(text: &str) -> Option<String> {
@@ -274,6 +280,15 @@ mod tests {
             "#[wasm_bindgen_test]",
         ] {
             assert!(marks_test(attr), "{attr}");
+        }
+    }
+
+    #[test]
+    fn only_libtest_bench_marks_a_bench() {
+        use super::marks_bench;
+        assert!(marks_bench("#[bench]"));
+        for attr in ["#[benchmark]", "#[my_bench]", "#[divan::bench]", "#[test]"] {
+            assert!(!marks_bench(attr), "{attr}");
         }
     }
 

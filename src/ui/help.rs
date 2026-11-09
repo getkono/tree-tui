@@ -38,17 +38,17 @@ const BINDINGS: &[(&str, &str)] = &[
     ("q / Ctrl-c", "quit"),
 ];
 
-/// The bindings, with one row per live line facet slotted in after `x` (they
-/// are generated, so a facet the collector cannot produce yet has no row).
+/// The bindings, with one row per line facet slotted in after `x` (generated
+/// from `Facet::ALL`, so a new facet gets its row for free).
 fn bindings() -> Vec<(String, String)> {
     let mut rows = Vec::with_capacity(BINDINGS.len() + Facet::ALL.len());
     for &(keys, description) in BINDINGS {
         rows.push((keys.to_string(), description.to_string()));
         if keys == FACET_ANCHOR {
-            rows.extend(Facet::live().map(|facet| {
+            rows.extend(Facet::ALL.into_iter().map(|facet| {
                 (
                     facet.key().to_string(),
-                    format!("hide / show {} lines (or click)", facet.label()),
+                    format!("hide / show {} lines (or click)", facet.description()),
                 )
             }));
         }
@@ -104,7 +104,7 @@ pub fn render(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
 
-    /// Every live facet gets a row, right after the anchor binding.
+    /// Every facet gets a row, right after the anchor binding.
     #[test]
     fn facet_rows_follow_the_anchor() {
         let rows = bindings();
@@ -112,13 +112,19 @@ mod tests {
             .iter()
             .position(|(keys, _)| keys == FACET_ANCHOR)
             .expect("the anchor binding exists");
-        let live: Vec<Facet> = Facet::live().collect();
-        for (offset, facet) in live.iter().enumerate() {
+        let facets: Vec<Facet> = Facet::ALL.into_iter().collect();
+        for (offset, facet) in facets.iter().enumerate() {
             let (keys, description) = &rows[anchor + 1 + offset];
             assert_eq!(keys, &facet.key().to_string());
             assert!(description.contains(facet.label()), "{description}");
         }
-        assert_eq!(rows.len(), BINDINGS.len() + live.len());
+        // The bench chip says only `bench`; its help row names examples too.
+        let bench = Facet::ALL
+            .iter()
+            .position(|&facet| facet == Facet::BenchExample)
+            .expect("bench is a facet");
+        assert!(rows[anchor + 1 + bench].1.contains("example"));
+        assert_eq!(rows.len(), BINDINGS.len() + facets.len());
     }
 
     /// On a terminal with room for it, every row renders whole: the popup is

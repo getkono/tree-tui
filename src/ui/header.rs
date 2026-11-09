@@ -122,7 +122,8 @@ const CHIP_GAP: u16 = 3;
 /// The chip texts for one layout: `labelled(facet)` says whether a chip keeps
 /// its label (`t test`) or shrinks to its key (`t`).
 fn chip_texts(labelled: impl Fn(Facet) -> bool) -> Vec<(Facet, String)> {
-    Facet::live()
+    Facet::ALL
+        .into_iter()
         .map(|facet| {
             let text = if labelled(facet) {
                 format!("{} {}", facet.key(), facet.label())
@@ -156,7 +157,7 @@ fn fit_chips(hidden: Hidden, room: u16) -> Option<Vec<(Facet, String)>> {
     .find(|chips| chips_width(chips) <= room)
 }
 
-/// The code lens's facet chips, right-aligned on `row`: one per live facet,
+/// The code lens's facet chips, right-aligned on `row`: one per facet,
 /// lit while its lines count and struck through while hidden. As the row
 /// narrows, the chips shrink to their keys (see [`fit_chips`]). When even the
 /// keys do not fit beside the recap's `recap_width` columns, they are left out

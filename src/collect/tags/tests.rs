@@ -409,3 +409,58 @@ fn non_utf8_files_are_not_read_in_file() {
     let tagging = Detector::new().tag(LanguageType::Rust, Path::new("src/x.rs"), &bytes);
     assert_eq!(tagging, Tagging::default());
 }
+
+/// The 1-based lines carrying `tags` (all of them).
+fn lines_with(lang: LanguageType, rel: &str, text: &str, tags: TagSet) -> Vec<usize> {
+    let tagging = tag(lang, rel, text);
+    (0..text.lines().count())
+        .filter(|&row| {
+            let at = tagging.at(row);
+            at.union(tags) == at
+        })
+        .map(|row| row + 1)
+        .collect()
+}
+
+#[test]
+fn a_bench_function_is_tagged_bench_not_test() {
+    let text = "\
+fn shipped() {}
+#[bench]
+fn bench_walk(b: &mut Bencher) {}
+";
+    assert_eq!(
+        lines_with(LanguageType::Rust, "src/lib.rs", text, TagSet::BENCH),
+        vec![2, 3]
+    );
+    assert!(rust(text).is_empty());
+}
+
+/// A `#[bench]` inside a `cfg(test)` module carries both tags.
+#[test]
+fn a_bench_inside_a_test_module_carries_both_tags() {
+    let text = "\
+#[cfg(test)]
+mod tests {
+    #[bench]
+    fn b(b: &mut Bencher) {}
+}
+";
+    let both = TagSet::TEST.union(TagSet::BENCH);
+    assert_eq!(
+        lines_with(LanguageType::Rust, "src/lib.rs", text, both),
+        vec![3, 4]
+    );
+    assert_eq!(rust(text), vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn bench_and_example_directories_tag_whole_files() {
+    for rel in ["benches/walk.rs", "examples/demo.rs", "bench/x_test.go"] {
+        let tagging = tag(LanguageType::Rust, rel, "fn main() {}\n");
+        assert!(tagging.whole.intersects(TagSet::BENCH), "{rel}");
+    }
+    // A test file under a benchmark directory is both.
+    let both = tag(LanguageType::Go, "bench/x_test.go", "package x\n");
+    assert_eq!(both.whole, TagSet::TEST.union(TagSet::BENCH));
+}

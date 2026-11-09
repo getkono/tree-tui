@@ -135,21 +135,19 @@ fn icon_style(value: &str) -> Result<IconStyle, CliError> {
     })
 }
 
-/// Add the facets named in a comma-separated `--hide` value to `hide`. Only
-/// facets the collector can produce are accepted; the rest are reported with
-/// the accepted names.
+/// Add the facets named in a comma-separated `--hide` value to `hide`. An
+/// unknown name is reported with the accepted ones.
 fn hide_facets(value: &str, hide: &mut Hidden) -> Result<(), CliError> {
     for name in value.split(',') {
-        let facet = Facet::from_label(name.trim())
-            .filter(|facet| facet.is_live())
-            .ok_or_else(|| CliError::BadValue {
-                flag: "--hide",
-                value: name.trim().to_string(),
-                expected: Facet::live()
-                    .map(Facet::label)
-                    .collect::<Vec<_>>()
-                    .join(", "),
-            })?;
+        let facet = Facet::from_label(name.trim()).ok_or_else(|| CliError::BadValue {
+            flag: "--hide",
+            value: name.trim().to_string(),
+            expected: Facet::ALL
+                .into_iter()
+                .map(Facet::label)
+                .collect::<Vec<_>>()
+                .join(", "),
+        })?;
         hide.insert(facet);
     }
     Ok(())
@@ -157,7 +155,8 @@ fn hide_facets(value: &str, hide: &mut Hidden) -> Result<(), CliError> {
 
 /// The multi-line usage string.
 pub fn usage() -> String {
-    let hide = Facet::live()
+    let hide = Facet::ALL
+        .into_iter()
         .map(Facet::label)
         .collect::<Vec<_>>()
         .join(", ");
@@ -226,7 +225,7 @@ mod tests {
     }
 
     #[test]
-    fn hide_rejects_a_missing_unknown_or_unavailable_facet() {
+    fn hide_rejects_a_missing_or_unknown_facet() {
         assert_eq!(
             parse_args(&["--hide"]),
             Err(CliError::MissingValue("--hide"))
@@ -235,15 +234,10 @@ mod tests {
             let err = parse_args(&["--hide", bad]).unwrap_err();
             assert!(
                 matches!(&err, CliError::BadValue { flag: "--hide", expected, .. }
-                    if expected == "test, generated, comment, blank"),
+                    if expected == "test, generated, bench, comment, blank"),
                 "{bad:?} gave {err:?}"
             );
         }
-        // Known, but nothing produces it yet.
-        assert!(matches!(
-            parse_args(&["--hide=bench"]),
-            Err(CliError::BadValue { flag: "--hide", .. })
-        ));
     }
 
     #[test]

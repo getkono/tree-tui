@@ -967,7 +967,7 @@ impl Loaded {
     /// are). Only the view moves: the values re-read the
     /// cached layer, so the rows re-sort and rebuild and nothing recomputes.
     fn toggle_facet(&mut self, facet: Facet) {
-        if !facet.is_live() || self.active_lens != Lens::Code {
+        if self.active_lens != Lens::Code {
             return;
         }
         self.hidden.toggle(facet);
@@ -3193,26 +3193,18 @@ mod tests {
         assert!(!loaded(&app).hidden.contains(Facet::Comment));
     }
 
-    /// Only facets the collector can produce answer to a key; the rest stay
-    /// unbound until it can.
+    /// Every facet answers to its key.
     #[test]
-    fn only_live_facets_have_keys() {
+    fn every_facet_has_a_key() {
         for facet in Facet::ALL {
             let action = action::map_key(char_key(facet.key()));
-            if facet.is_live() {
-                assert_eq!(action, Action::ToggleFacet(facet));
-            } else {
-                assert_eq!(action, Action::None, "{facet:?} is not live yet");
-            }
+            assert_eq!(action, Action::ToggleFacet(facet));
         }
-        let mut app = facet_app();
-        app.update(Action::ToggleFacet(Facet::BenchExample));
-        assert!(loaded(&app).hidden.is_empty());
     }
 
     /// Hiding a *tag* drops its lines from every code column and from the
-    /// per-language split, not just from `lines`. (No detector tags lines yet,
-    /// so the layer and the hidden set are built by hand.)
+    /// per-language split, not just from `lines`. (The layer and the hidden
+    /// set are built by hand, independent of the detectors.)
     #[test]
     fn hiding_a_tag_drops_its_lines_from_every_column() {
         use crate::model::{TagBuckets, TagSet};
