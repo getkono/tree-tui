@@ -836,6 +836,63 @@ mod tests {
         assert!(!footer(&terminal).contains("hide lines"));
     }
 
+    /// At 120 columns the code lens footer still reads whole: no hint is cut
+    /// mid-word, and the facet keys, help, and quit all survive. Narrower
+    /// footers shed whole hints, never a fragment of one.
+    #[test]
+    fn the_footer_drops_whole_hints_instead_of_clipping() {
+        const HINTS: [&str; 9] = [
+            "m lens",
+            "s sort",
+            "r reverse",
+            "z declutter",
+            "x exclude",
+            "/ filter",
+            "t/n/o/c/b hide lines",
+            "? help",
+            "q quit",
+        ];
+        let footer_at = |width: u16, lens: u8| {
+            let mut app = sample_app();
+            app.update(crate::action::Action::JumpLens(lens));
+            let mut terminal = Terminal::new(TestBackend::new(width, 16)).unwrap();
+            terminal.draw(|frame| render(frame, &mut app)).unwrap();
+            let view = format!("{}", terminal.backend());
+            // The backend quotes each row; strip those and the trailing pad.
+            view.lines()
+                .last()
+                .unwrap()
+                .trim_matches('"')
+                .trim_end()
+                .to_string()
+        };
+
+        let wide = footer_at(120, 1);
+        for hint in ["t/n/o/c/b hide lines", "? help", "q quit", "/ filter"] {
+            assert!(wide.contains(hint), "missing {hint:?} at 120:\n{wide}");
+        }
+
+        for width in [120, 100, 80, 60, 40] {
+            for lens in 1..=4 {
+                let footer = footer_at(width, lens);
+                // Everything after the sort arrow is hints; each piece must be
+                // one of them, whole.
+                let (_, hints) = footer
+                    .split_once(['↓', '↑'])
+                    .unwrap_or_else(|| panic!("no sort arrow at {width}:\n{footer}"));
+                for piece in hints.split(" · ").map(str::trim).filter(|p| !p.is_empty()) {
+                    assert!(
+                        HINTS.contains(&piece),
+                        "clipped hint {piece:?} at {width} on lens {lens}:\n{footer}"
+                    );
+                }
+                if width >= 60 {
+                    assert!(footer.ends_with("q quit"), "{width}/{lens}:\n{footer}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn renders_the_help_overlay() {
         let mut app = sample_app();
