@@ -190,6 +190,13 @@ impl CodeData {
             .collect()
     }
 
+    /// Add `tags` to every line of this entry.
+    pub fn retag(&mut self, tags: TagSet) {
+        for buckets in self.langs.values_mut() {
+            buckets.retag(tags);
+        }
+    }
+
     /// Add `other`'s lines to this entry (the bottom-up fold).
     pub fn merge(&mut self, other: &CodeData) {
         for (&lang, buckets) in &other.langs {
