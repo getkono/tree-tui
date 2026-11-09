@@ -38,30 +38,58 @@ const BINDINGS: &[(&str, &str)] = &[
     ("q / Ctrl-c", "quit"),
 ];
 
-/// The bindings, with one merged row for the line facets slotted in after `x`
-/// (generated from `Facet::ALL`, so a new facet joins it for free). One row,
-/// not one per facet, keeps the overlay short enough for a 30-row terminal.
+/// The narrowest terminal the overlay must fit without cutting a row off.
+const FIT_COLUMNS: usize = 80;
+
+/// The bindings, with the merged line-facet rows slotted in after `x`
+/// (generated from `Facet::ALL`, so a new facet joins them for free). Merging
+/// facets rather than giving each its own row keeps the overlay short enough
+/// for a 30-row terminal.
 fn bindings() -> Vec<(String, String)> {
-    let mut rows = Vec::with_capacity(BINDINGS.len() + 1);
+    let mut rows = Vec::with_capacity(BINDINGS.len() + Facet::ALL.len());
     for &(keys, description) in BINDINGS {
         rows.push((keys.to_string(), description.to_string()));
         if keys == FACET_ANCHOR {
-            rows.push(facet_row());
+            rows.extend(facet_rows());
         }
     }
     rows
 }
 
-/// `t / n / o / c / b` → `hide / show test · generated · … lines`. No
-/// `(or click)`: it would widen the popup past a 100-column terminal, and the
-/// header's facet chips already read as clickable.
-fn facet_row() -> (String, String) {
-    let keys: Vec<String> = Facet::ALL.iter().map(|f| f.key().to_string()).collect();
-    let names: Vec<&str> = Facet::ALL.iter().map(|f| f.description()).collect();
-    (
-        keys.join(" / "),
-        format!("hide / show {} lines", names.join(" · ")),
-    )
+/// `t / n / o` → `hide / show test · generated · bench / example lines`, and
+/// so on: the facets packed in order, as many to a row as fit the description
+/// column an `FIT_COLUMNS`-wide terminal leaves. No `(or click)`: it would
+/// cost a row, and the header's facet chips already read as clickable.
+fn facet_rows() -> Vec<(String, String)> {
+    let row = |facets: &[Facet]| {
+        let keys: Vec<String> = facets.iter().map(|f| f.key().to_string()).collect();
+        let names: Vec<&str> = facets.iter().map(|f| f.description()).collect();
+        (
+            keys.join(" / "),
+            format!("hide / show {} lines", names.join(" · ")),
+        )
+    };
+    // The popup keeps 2 columns of margin a side, then border and padding take
+    // 2 more a side; each row is `  KEYS   DESCRIPTION`, KEYS padded to the
+    // widest static key (a packed row's keys are shorter, see the tests).
+    let key_width = BINDINGS
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0);
+    let room = FIT_COLUMNS - 8 - 2 - key_width - 3;
+
+    let mut rows = Vec::new();
+    let mut start = 0;
+    for end in 1..=Facet::ALL.len() {
+        let wider = row(&Facet::ALL[start..end]).1.chars().count() > room;
+        if wider && end - 1 > start {
+            rows.push(row(&Facet::ALL[start..end - 1]));
+            start = end - 1;
+        }
+    }
+    rows.push(row(&Facet::ALL[start..]));
+    rows
 }
 
 pub fn render(frame: &mut Frame, area: Rect) {
@@ -120,22 +148,49 @@ pub fn render(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
 
-    /// Every facet is named in one merged row, right after the anchor binding.
+    /// Every facet is named, in order, in the merged rows right after the
+    /// anchor binding, and merging saves rows over one row per facet.
     #[test]
-    fn facet_row_follows_the_anchor() {
+    fn facet_rows_follow_the_anchor() {
         let rows = bindings();
         let anchor = rows
             .iter()
             .position(|(keys, _)| keys == FACET_ANCHOR)
             .expect("the anchor binding exists");
-        let (keys, description) = &rows[anchor + 1];
+        let facet_rows = facet_rows();
+        assert_eq!(&rows[anchor + 1..anchor + 1 + facet_rows.len()], facet_rows);
+        assert!(facet_rows.len() < Facet::ALL.len(), "{facet_rows:?}");
+        let keys: Vec<&str> = facet_rows.iter().map(|(k, _)| k.as_str()).collect();
+        let descriptions: Vec<&str> = facet_rows.iter().map(|(_, d)| d.as_str()).collect();
+        let (keys, descriptions) = (keys.join(" / "), descriptions.join(" "));
+        let expected: Vec<String> = Facet::ALL.iter().map(|f| f.key().to_string()).collect();
+        assert_eq!(keys, expected.join(" / "));
         for facet in Facet::ALL {
-            assert!(keys.contains(facet.key()), "{keys} lacks {}", facet.key());
-            assert!(description.contains(facet.label()), "{description}");
+            assert!(descriptions.contains(facet.label()), "{descriptions}");
         }
         // The bench chip says only `bench`; its help row names examples too.
-        assert!(description.contains("example"), "{description}");
-        assert_eq!(rows.len(), BINDINGS.len() + 1);
+        assert!(descriptions.contains("example"), "{descriptions}");
+        // A packed row's keys never widen the key column past the static keys.
+        let static_width = BINDINGS.iter().map(|(k, _)| k.chars().count()).max();
+        for (keys, _) in &facet_rows {
+            assert!(Some(keys.chars().count()) <= static_width, "{keys}");
+        }
+    }
+
+    /// An 80x30 terminal shows every binding whole, facet rows included, with
+    /// no more-indicator.
+    #[test]
+    fn fits_an_80_column_terminal() {
+        let view = draw(80, 30);
+        for (keys, description) in &bindings() {
+            assert!(view.contains(keys.as_str()), "{keys} cut off:\n{view}");
+            assert!(
+                view.contains(description.as_str()),
+                "{description} cut off:\n{view}"
+            );
+        }
+        assert!(view.contains("comment · blank lines"), "{view}");
+        assert!(!view.contains("more ↓"), "{view}");
     }
 
     fn draw(width: u16, height: u16) -> String {
@@ -179,8 +234,7 @@ mod tests {
     }
 
     /// On a terminal with room for it, every row renders whole: the popup is
-    /// as wide as its widest description, so none is cut off mid-word — even
-    /// on a 100-column terminal.
+    /// as wide as its widest description, so none is cut off mid-word.
     #[test]
     fn every_row_renders_in_full() {
         let rows = bindings();
