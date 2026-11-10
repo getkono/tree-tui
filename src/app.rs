@@ -18,6 +18,7 @@ use crate::model::{
     StatusData, SubKey, Tree,
 };
 use crate::scan::ScanOutcome;
+use crate::ui::HelpScroll;
 use crate::ui::preview::Preview;
 use crate::ui::reader::{Handoff, Reader, ReaderExit};
 
@@ -230,6 +231,8 @@ pub struct App {
     pub screen: Screen,
     pub mode: Mode,
     pub show_help: bool,
+    /// How far the help overlay is scrolled (it scrolls on a short terminal).
+    pub help_scroll: HelpScroll,
     pub spinner: usize,
     pub elapsed: Duration,
     pub should_quit: bool,
@@ -261,6 +264,7 @@ impl App {
             screen: Screen::Loading,
             mode: Mode::Normal,
             show_help: false,
+            help_scroll: HelpScroll::default(),
             spinner: 0,
             elapsed: Duration::ZERO,
             should_quit: false,
@@ -408,9 +412,7 @@ impl App {
         }
 
         if self.show_help {
-            if matches!(key.code, KeyCode::Char('?' | 'q') | KeyCode::Esc) {
-                self.show_help = false;
-            }
+            self.handle_help_key(key);
             return;
         }
 
@@ -420,10 +422,33 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('?') => {
+                self.show_help = true;
+                self.help_scroll.reset();
+            }
             KeyCode::Char('/') => self.mode = Mode::Filter,
             KeyCode::Esc => self.clear_filter(),
             _ => self.update(action::map_key(key)),
+        }
+    }
+
+    /// The help overlay owns input while it is open: `?`, `q` and Esc close it,
+    /// and the tree's movement keys scroll it. Anything else is swallowed, so
+    /// nothing changes behind the popup.
+    fn handle_help_key(&mut self, key: KeyEvent) {
+        if matches!(key.code, KeyCode::Char('?' | 'q') | KeyCode::Esc) {
+            self.show_help = false;
+            return;
+        }
+        let scroll = &mut self.help_scroll;
+        match action::map_key(key) {
+            Action::Down => scroll.scroll_by(1),
+            Action::Up => scroll.scroll_by(-1),
+            Action::PageDown => scroll.page_by(1),
+            Action::PageUp => scroll.page_by(-1),
+            Action::First => scroll.reset(),
+            Action::Last => scroll.jump_to_bottom(),
+            _ => {}
         }
     }
 
@@ -568,6 +593,11 @@ impl App {
     /// tree row / 3 preview lines per notch. Every target clamps, so a scroll
     /// can't run off the edge.
     pub fn handle_scroll(&mut self, col: u16, row: u16, delta: i32) {
+        // The help overlay covers the panes, so the wheel scrolls it instead.
+        if self.show_help {
+            self.help_scroll.scroll_by(delta as isize);
+            return;
+        }
         match &mut self.screen {
             Screen::Loaded(loaded) => match loaded.panes.hit(col, row) {
                 Some(Focus::Preview) => {
@@ -1540,6 +1570,50 @@ mod tests {
             app.active_file_view().is_none(),
             "an image must be cleared while the help overlay is up"
         );
+    }
+
+    /// While the help overlay is open, the movement keys and the wheel scroll
+    /// it and leave the tree behind it alone; reopening starts at the top.
+    #[test]
+    fn movement_keys_scroll_the_open_help_overlay() {
+        let mut app = sample_app();
+        let selected = app_selected(&app);
+        app.handle_key(key(KeyCode::Char('?')));
+        assert!(app.show_help);
+
+        let mut expected = HelpScroll::default();
+        for (code, step) in [
+            (KeyCode::Char('j'), 1),
+            (KeyCode::Down, 1),
+            (KeyCode::Up, -1),
+        ] {
+            app.handle_key(key(code));
+            expected.scroll_by(step);
+            assert_eq!(app.help_scroll, expected, "{code:?}");
+        }
+        app.handle_key(key(KeyCode::PageDown));
+        expected.page_by(1);
+        assert_eq!(app.help_scroll, expected);
+        app.handle_key(key(KeyCode::Char('k')));
+        expected.scroll_by(-1);
+        assert_eq!(app.help_scroll, expected);
+        app.handle_scroll(0, 0, 1);
+        expected.scroll_by(1);
+        assert_eq!(app.help_scroll, expected);
+        assert_ne!(app.help_scroll, HelpScroll::default());
+        assert_eq!(app_selected(&app), selected, "the tree must not move");
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.show_help);
+        app.handle_key(key(KeyCode::Char('?')));
+        assert_eq!(app.help_scroll, HelpScroll::default());
+    }
+
+    fn app_selected(app: &App) -> Option<NodeId> {
+        let Screen::Loaded(loaded) = &app.screen else {
+            unreachable!("sample_app is loaded")
+        };
+        loaded.selected_id()
     }
 
     /// A real directory under the system temp dir, removed on drop.
