@@ -10,6 +10,8 @@ pub mod reader;
 pub mod theme;
 mod tree_view;
 
+pub use help::HelpScroll;
+
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -93,7 +95,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 
     if app.show_help {
-        help::render(frame, area);
+        help::render(frame, area, &mut app.help_scroll);
     }
 }
 

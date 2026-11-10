@@ -92,7 +92,55 @@ fn facet_rows() -> Vec<(String, String)> {
     rows
 }
 
-pub fn render(frame: &mut Frame, area: Rect) {
+/// The overlay's scroll position. A terminal too short for every binding row
+/// scrolls them (j/k, arrows, PgUp/PgDn, g/G, the wheel) instead of cutting
+/// the bottom off for good.
+///
+/// The reducer moves `offset`; [`render`] records how many rows fit and clamps
+/// `offset` to them, so a resize that makes room never strands the view past
+/// the last row.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HelpScroll {
+    /// Index of the first binding row on screen.
+    offset: usize,
+    /// Binding rows the last frame had room for (0 before the first frame).
+    page: usize,
+}
+
+impl HelpScroll {
+    /// Back to the top, as the overlay is when it opens.
+    pub fn reset(&mut self) {
+        self.offset = 0;
+    }
+
+    /// Scroll by `delta` rows (positive is down), stopping at either end.
+    pub fn scroll_by(&mut self, delta: isize) {
+        self.offset = self.offset.saturating_add_signed(delta).min(self.max());
+    }
+
+    /// Scroll by `pages` screenfuls (positive is down).
+    pub fn page_by(&mut self, pages: isize) {
+        self.scroll_by(pages.saturating_mul(self.page.max(1) as isize));
+    }
+
+    /// Jump to the last screenful.
+    pub fn jump_to_bottom(&mut self) {
+        self.offset = self.max();
+    }
+
+    /// The furthest `offset` can go with the last frame's page: the one that
+    /// puts the last row at the bottom.
+    fn max(&self) -> usize {
+        row_count().saturating_sub(self.page)
+    }
+}
+
+/// How many rows the overlay lists.
+fn row_count() -> usize {
+    bindings().len()
+}
+
+pub fn render(frame: &mut Frame, area: Rect, scroll: &mut HelpScroll) {
     let bindings = bindings();
     // `{:<w$}` pads by chars, so measure keys in chars (not bytes: `↓`, `–`).
     let key_width = bindings
@@ -131,17 +179,26 @@ pub fn render(frame: &mut Frame, area: Rect) {
         .title(" keybindings ")
         .border_style(Style::default().fg(theme::ACCENT))
         .padding(Padding::horizontal(1));
-    // A terminal too short for every row says how many fell off the bottom,
-    // rather than dropping them silently.
-    let hidden = lines
-        .len()
-        .saturating_sub(height.saturating_sub(2) as usize);
-    if hidden > 0 {
-        block = block.title_bottom(Line::from(format!(" {hidden} more ↓ ")).right_aligned());
+    // A terminal too short for every row scrolls them, and says how many are
+    // out of view on each side rather than dropping them silently.
+    scroll.page = height.saturating_sub(2) as usize;
+    scroll.offset = scroll.offset.min(scroll.max());
+    let above = scroll.offset;
+    let below = lines.len().saturating_sub(above + scroll.page);
+    if above > 0 {
+        block = block.title_top(Line::from(format!(" {above} more ↑ ")).right_aligned());
+    }
+    if below > 0 {
+        block = block.title_bottom(Line::from(format!(" {below} more ↓ ")).right_aligned());
     }
 
     frame.render_widget(Clear, popup);
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((u16::try_from(above).unwrap_or(u16::MAX), 0)),
+        popup,
+    );
 }
 
 #[cfg(test)]
@@ -194,12 +251,73 @@ mod tests {
     }
 
     fn draw(width: u16, height: u16) -> String {
+        draw_scrolled(width, height, &mut HelpScroll::default())
+    }
+
+    fn draw_scrolled(width: u16, height: u16, scroll: &mut HelpScroll) -> String {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
 
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        terminal.draw(|frame| render(frame, frame.area())).unwrap();
+        terminal
+            .draw(|frame| render(frame, frame.area(), scroll))
+            .unwrap();
         format!("{}", terminal.backend())
+    }
+
+    /// On a terminal too short for every row, scrolling reaches each of them,
+    /// and the indicators count what is out of view above and below.
+    #[test]
+    fn a_short_terminal_scrolls_to_every_row() {
+        let rows = bindings();
+        // 20 rows: a popup of 18, so 16 bindings show at a time.
+        let mut scroll = HelpScroll::default();
+        let top = draw_scrolled(120, 20, &mut scroll);
+        assert!(!top.contains("more ↑"), "{top}");
+        assert_eq!(scroll.page, 16);
+
+        scroll.scroll_by(1);
+        let one = draw_scrolled(120, 20, &mut scroll);
+        assert!(one.contains(" 1 more ↑ "), "{one}");
+        let below = rows.len() - 16 - 1;
+        assert!(one.contains(&format!(" {below} more ↓ ")), "{one}");
+        assert!(!one.contains(rows[0].1.as_str()), "{one}");
+        assert!(one.contains(rows[16].1.as_str()), "{one}");
+
+        scroll.jump_to_bottom();
+        let bottom = draw_scrolled(120, 20, &mut scroll);
+        let above = rows.len() - 16;
+        assert!(bottom.contains(&format!(" {above} more ↑ ")), "{bottom}");
+        assert!(!bottom.contains("more ↓"), "{bottom}");
+        for row in [
+            "filter by name (Esc clears)",
+            "toggle this help",
+            "q / Ctrl-c",
+        ] {
+            assert!(bottom.contains(row), "{row} unreachable:\n{bottom}");
+        }
+
+        // Scrolling stops at the last screenful and at the top.
+        scroll.scroll_by(5);
+        assert_eq!(scroll.offset, above);
+        scroll.page_by(-10);
+        assert_eq!(scroll.offset, 0);
+        scroll.page_by(1);
+        assert_eq!(scroll.offset, 16.min(above));
+    }
+
+    /// A resize that makes room for every row pulls a scrolled view back to
+    /// the top, rather than leaving rows above it out of view for nothing.
+    #[test]
+    fn growing_the_terminal_unscrolls_the_view() {
+        let mut scroll = HelpScroll::default();
+        draw_scrolled(120, 20, &mut scroll);
+        scroll.jump_to_bottom();
+        assert!(scroll.offset > 0);
+        let view = draw_scrolled(120, 40, &mut scroll);
+        assert_eq!(scroll.offset, 0);
+        assert!(!view.contains("more ↑"), "{view}");
+        assert!(!view.contains("more ↓"), "{view}");
     }
 
     /// A 120x30 terminal shows every binding, down to `/`, `?` and `q`, with
