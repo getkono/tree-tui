@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2](https://github.com/getkono/tree-tui/compare/v0.3.1...v0.3.2) - 2026-11-10
+
+### Added
+
+- *(code)* let the code lens hide benchmarks and examples ([#86](https://github.com/getkono/tree-tui/pull/86))
+- *(code)* detect generated files and let the code lens hide them ([#85](https://github.com/getkono/tree-tui/pull/85))
+- *(code)* detect test code and let the code lens hide it ([#84](https://github.com/getkono/tree-tui/pull/84))
+- *(code)* hide comment and blank lines from the code lens ([#83](https://github.com/getkono/tree-tui/pull/83))
+
+### Fixed
+
+- *(help)* scroll the keybinding overlay on short terminals ([#92](https://github.com/getkono/tree-tui/pull/92))
+- *(help)* fit the keybinding overlay on a 30-row terminal ([#91](https://github.com/getkono/tree-tui/pull/91))
+- *(ui)* drop whole footer hints instead of clipping them mid-word ([#89](https://github.com/getkono/tree-tui/pull/89))
+- *(code)* count blank, doc-comment and embedded lines the way the lens means them ([#82](https://github.com/getkono/tree-tui/pull/82))
+
+### Other
+
+- *(deps)* move the karet chain to 0.7.1 in lockstep and bump gix to 0.90
+- Merge pull request #77 from getkono/dependabot/cargo/unicode-width-0.2.3
+- bump karet-fileview from 0.6.1 to 0.7.1
+
 ## [0.3.1](https://github.com/getkono/tree-tui/compare/v0.3.0...v0.3.1) - 2026-10-30
 
 ### Fixed
