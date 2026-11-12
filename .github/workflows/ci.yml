@@ -86,3 +86,86 @@ jobs:
       - uses: jdx/mise-action@v5
       - name: Conventional Commits check
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+
+  # vibe-check classifies this pull request's diff and writes a step summary.
+  # See https://github.com/getkono/vibe-check.
+  #
+  # A separate job, deliberately, for three reasons: `check` above is this
+  # repository's required status check and widening it changes what branch
+  # protection means; `check` is shallow on purpose and only this job needs full
+  # history; and a job still earning trust has to be droppable without touching
+  # the gate.
+  #
+  # NOT a required check yet. At vibe-check's current milestone `classify` is
+  # unimplemented and exits 1 (getkono/vibe-check#92). This job is here to prove
+  # the distribution chain works from outside its own repository, so it fails
+  # when that chain breaks — guard, resolve, digest check, unpack, or a binary
+  # that cannot run — and reports the expected "not implemented" `classify`
+  # as a warning instead of a red check on every pull request. Once exit 0 is the normal outcome, drop `continue-on-error`
+  # and the gate step below, and make it required.
+  vibe-check:
+    name: vibe-check
+    # Only pull requests have a merge base to classify against.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # Never `pull_request_target`: vibe-check refuses that trigger outright,
+    # because it grants a write token and repository secrets to a workflow
+    # evaluating fork-authored code.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # vibe-check computes `git merge-base` itself rather than trusting
+          # `github.event.pull_request.base.sha`, which is the base branch tip
+          # at an earlier moment and drifts as master moves. That needs history,
+          # and the action refuses a shallow clone rather than quietly
+          # unshallowing it.
+          fetch-depth: 0
+          persist-credentials: false
+      # The immutable tag, not the `@v0` alias: before 1.0 the alias carries no
+      # compatibility promise.
+      - id: vibe-check
+        uses: getkono/vibe-check@v0.1.0
+        continue-on-error: true
+      # Fail this job only when the distribution chain breaks, not on the
+      # expected `classify` failure (getkono/vibe-check#92). The verdict file's
+      # existence proves nothing: the action's classify.sh creates it with
+      # `> "$out"` before the binary runs, so an exec failure or a panic leaves
+      # it empty. A non-empty file means classify wrote a verdict. An empty one
+      # is accepted only when re-running the verified binary shows the
+      # expected "not implemented" exit 1; any other result fails the job.
+      - name: Require the distribution chain to reach classify
+        if: always()
+        env:
+          OUTCOME: ${{ steps.vibe-check.outcome }}
+          VERDICT_FILE: ${{ steps.vibe-check.outputs.verdict-file }}
+        run: |
+          verdict="${VERDICT_FILE:-$RUNNER_TEMP/vibe-check.json}"
+          if [ "$OUTCOME" = success ]; then
+            echo "vibe-check classified the change."
+            exit 0
+          fi
+          if [ -s "$verdict" ]; then
+            echo "::warning::vibe-check classify wrote a verdict and exited non-zero. The distribution chain worked."
+            exit 0
+          fi
+          if [ ! -f "$verdict" ]; then
+            echo "::error::vibe-check failed before classify ran: the distribution chain is broken (outcome: $OUTCOME)."
+            exit 1
+          fi
+          shopt -s nullglob
+          bins=("$RUNNER_TEMP"/vibe-check-*/vibe-check)
+          if [ "${#bins[@]}" -ne 1 ]; then
+            echo "::error::vibe-check wrote no verdict and its installed binary was not found under RUNNER_TEMP (found ${#bins[@]})."
+            exit 1
+          fi
+          code=0
+          stderr="$("${bins[0]}" classify --format json 2>&1 >/dev/null)" || code=$?
+          if [ "$code" -eq 1 ] && printf '%s' "$stderr" | grep -q 'is not implemented in this build'; then
+            echo "::warning::vibe-check classify is not implemented yet (exit 1); expected until getkono/vibe-check#92 lands. The distribution chain worked."
+          else
+            printf '%s\n' "$stderr" >&2
+            echo "::error::vibe-check wrote no verdict, and re-running classify gave exit $code (expected: exit 1 with 'is not implemented in this build')."
+            exit 1
+          fi
