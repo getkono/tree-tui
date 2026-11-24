@@ -55,7 +55,7 @@ ratatui = "0.30.2"
 karet-core = "0.7.1"
 karet-editor = "0.7.1"
 karet-filetype = "0.7.1"
-karet-fileview = { version = "0.7.1", default-features = false }
+karet-fileview = { version = "0.8.0", default-features = false }
 karet-pdf = { version = "0.7.1", optional = true }
 karet-syntax = "0.7.1"
 karet-text = "0.7.1"
