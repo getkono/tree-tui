@@ -62,7 +62,7 @@ karet-text = "0.7.1"
 karet-theme = { version = "0.7.1", features = ["view"] }
 # The grammars live on the parse host; karet-syntax's `lang-*` are pass-throughs,
 # so enabling the bundle here covers the whole highlight path.
-karet-treesitter = { version = "0.7.1", features = ["all-languages"] }
+karet-treesitter = { version = "0.8.0", features = ["all-languages"] }
 thiserror = "2.0.21"
 tokei = { version = "15", default-features = false }
 tokio = { version = "1.54.1", features = ["full"] }
